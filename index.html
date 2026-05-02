@@ -1065,6 +1065,44 @@ function checkStatusTransitions(flights) {
   }
 }
 
+// ── KEEP-AWAKE ────────────────────────────────────────────────────────────
+// Creates a 2×2 canvas stream played as a muted looping video.
+// Active media playback signals to the OS/browser that the screen is in use,
+// preventing display sleep without any audio track (zero chime interference).
+function startKeepAwake() {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 2;
+    const ctx2d = canvas.getContext('2d');
+    ctx2d.fillStyle = '#000'; ctx2d.fillRect(0, 0, 2, 2);
+
+    const stream = canvas.captureStream(1); // 1 fps — negligible CPU
+
+    const vid = document.createElement('video');
+    vid.srcObject   = stream;
+    vid.muted       = true;
+    vid.loop        = true;
+    vid.playsInline = true;
+    // Tiny, off-screen, effectively invisible — but NOT display:none/opacity:0
+    // because some browsers suspend playback on fully hidden elements
+    vid.style.cssText = 'position:fixed;width:1px;height:1px;top:0;left:0;opacity:.01;pointer-events:none;z-index:-999;';
+    document.body.appendChild(vid);
+
+    vid.play().catch(e => console.warn('Keep-awake play failed:', e.message));
+
+    // Nudge the canvas every 30s so the stream stays "live" in picky browsers
+    setInterval(() => {
+      const v = (Date.now() % 2) ? '#000001' : '#000000';
+      ctx2d.fillStyle = v; ctx2d.fillRect(0, 0, 2, 2);
+    }, 30000);
+
+    console.log('Keep-awake: canvas stream video running');
+  } catch(e) {
+    console.warn('Keep-awake not available:', e.message);
+  }
+}
+
+startKeepAwake();
 init();
 </script>
 </body>
