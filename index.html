@@ -93,8 +93,9 @@
     .h-right { display:flex; align-items:center; gap:1vw; flex-shrink:0; margin-left:auto; }
     .dot { width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:var(--green-glo); animation:blink 2.2s ease-in-out infinite; }
     @keyframes blink { 0%,100%{opacity:1} 55%{opacity:.25} }
-    /* Both clocks share the same base style */
-    .clock { font-family:var(--f-disp); font-weight:400; letter-spacing:.1em; font-size:clamp(15px,1.7vw,27px); color:var(--txt); white-space:nowrap; }
+    /* Both clocks share the same base style — Share Tech Mono is truly monospaced,
+       so every digit is identical width and the layout never shifts */
+    .clock { font-family:var(--f-data); font-size:clamp(15px,1.7vw,27px); color:var(--txt); white-space:nowrap; letter-spacing:.06em; display:inline-block; }
     .clock-z  { font-size:.58em; color:var(--txt3); margin-left:3px; letter-spacing:.06em; }
     .clock-sep { width:1px; height:52%; background:var(--bd2); flex-shrink:0; }
     /* ICAO switcher */
@@ -200,6 +201,10 @@
     .fi span { color:var(--txt2); }
     .fi-err { color:rgba(240,100,100,.75); font-family:var(--f-data); font-size:clamp(7px,.62vw,11px); max-width:40vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .fi-sp { flex:1; }
+    /* Audio arm button */
+    .audio-btn { font-family:var(--f-ui); font-size:clamp(8px,.72vw,13px); font-weight:700; letter-spacing:.16em; text-transform:uppercase; background:transparent; border:1px solid var(--bd2); border-radius:3px; color:var(--txt3); padding:2px 9px; cursor:pointer; transition:all .2s; white-space:nowrap; }
+    .audio-btn:hover { border-color:var(--cyan); color:var(--cyan); }
+    .audio-btn.armed { border-color:rgba(0,232,122,.35); color:var(--green); background:rgba(0,232,122,.07); }
   </style>
 </head>
 <body>
@@ -283,6 +288,7 @@
   <div class="fi"><span id="f-count">—</span> aircraft</div>
   <div class="fi-sp"></div>
   <div class="fi-err" id="f-err"></div>
+  <button class="audio-btn" id="audio-btn" title="Tap once to enable arrival chimes">🔔 Enable Chimes</button>
   <div class="fi">Updated · <span id="f-upd">—</span></div>
   <div class="fi">Auto-refresh · <span>30s</span></div>
 </footer>
@@ -592,13 +598,13 @@ function tickClock() {
   const z = s => String(s).padStart(2,'0');
   // Zulu — HH:MM:SS Z
   document.getElementById('clock').innerHTML =
-    `${z(n.getUTCHours())}:${z(n.getUTCMinutes())}:${z(n.getUTCSeconds())}<span class="clock-z">Z</span>`;
-  // Local airport time — HH:MM TZ (24h, same font/size as zulu)
+    `${z(n.getUTCHours())}:${z(n.getUTCMinutes())}:${z(n.getUTCSeconds())}<span class="clock-z"> Z</span>`;
+  // Local — HH:MM TZ
   if (CFG.tz) {
-    const t = n.toLocaleTimeString('en-US', {timeZone:CFG.tz, hour:'2-digit', minute:'2-digit', hour12:false});
+    const localStr = n.toLocaleTimeString('en-US', {timeZone:CFG.tz, hour:'2-digit', minute:'2-digit', hour12:false});
     const tzEl = document.getElementById('clock-local-tz');
     document.getElementById('clock-local').innerHTML =
-      `${t}<span class="clock-z">${tzEl ? ' '+tzEl.textContent : ''}</span>`;
+      `${localStr}<span class="clock-z"> ${tzEl ? tzEl.textContent : ''}</span>`;
   }
 }
 setInterval(tickClock, 1000); tickClock();
@@ -915,7 +921,8 @@ async function refresh() {
     const flights = await fetchFlights();
     fetchMETAR(CFG.icao); // fire and forget
     renderTable(flights);
-    enrichRoutes(flights); // async background — patches route cells as data arrives
+    enrichRoutes(flights);
+    checkStatusTransitions(flights); // audio alerts on status change
     updateMarkers(flights);
     const n = new Date();
     const z = s => String(s).padStart(2,'0');
@@ -968,6 +975,9 @@ async function init() {
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') goToIcao(); });
   document.getElementById('icao-btn').addEventListener('click', goToIcao);
 
+  // Wire audio arm button (requires user gesture — can't autoplay without it)
+  document.getElementById('audio-btn').addEventListener('click', armAudio);
+
   setLoadingMsg('Initializing map…');
   initMap();
 
@@ -989,6 +999,70 @@ function showLoadingError(msg) {
   el.textContent = msg;
   el.style.display = 'block';
   document.getElementById('loading-msg').textContent = 'Could not load airport data';
+}
+
+// ── AUDIO ALERT SYSTEM ───────────────────────────────────────────────────
+let audioCtx  = null;
+let audioArmed = false;
+const prevStatus = new Map(); // hex → last known status
+
+function armAudio() {
+  if (audioArmed) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  audioArmed = true;
+  const btn = document.getElementById('audio-btn');
+  btn.textContent = '🔔 Chimes On';
+  btn.classList.add('armed');
+  // Soft confirmation ping so user knows audio is working
+  scheduleTone(880, 0.08, 0.3, 0.0);
+  scheduleTone(1108, 0.06, 0.35, 0.22);
+}
+
+function scheduleTone(freq, gain, duration, delay, type='sine') {
+  if (!audioCtx) return;
+  const t   = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const env = audioCtx.createGain();
+  osc.connect(env);
+  env.connect(audioCtx.destination);
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t);
+  // Smooth attack + exponential decay
+  env.gain.setValueAtTime(0, t);
+  env.gain.linearRampToValueAtTime(gain, t + 0.025);
+  env.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+  osc.start(t);
+  osc.stop(t + duration + 0.05);
+}
+
+function playArriving() {
+  // Two-tone descending chime — warm, attention-getting, not alarming
+  scheduleTone(987,  0.14, 0.55, 0.00);
+  scheduleTone(740,  0.11, 0.65, 0.38);
+}
+
+function playPattern() {
+  // Single soft ping — gentler, pattern traffic is less urgent
+  scheduleTone(830, 0.09, 0.45, 0.00);
+}
+
+function checkStatusTransitions(flights) {
+  if (!audioArmed) return;
+  const seen = new Set();
+  for (const f of flights) {
+    seen.add(f.hex);
+    const prev = prevStatus.get(f.hex);
+    const curr = f.status;
+    if (prev !== undefined && prev !== curr) {
+      if (curr === 'ARRIVING') playArriving();
+      else if (curr === 'PATTERN') playPattern();
+    }
+    prevStatus.set(f.hex, curr);
+  }
+  // Remove aircraft no longer in range so re-entry triggers again
+  for (const hex of prevStatus.keys()) {
+    if (!seen.has(hex)) prevStatus.delete(hex);
+  }
 }
 
 init();
