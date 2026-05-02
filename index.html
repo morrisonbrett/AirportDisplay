@@ -571,21 +571,76 @@ function distNm(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// Route cache declared here so getStatus can read it
+const routeCache = new Map();
+
+// Compass bearing from point A to point B (0–360°)
+function bearingTo(lat1, lon1, lat2, lon2) {
+  const r = Math.PI/180;
+  const dL = (lon2-lon1)*r;
+  const y  = Math.sin(dL)*Math.cos(lat2*r);
+  const x  = Math.cos(lat1*r)*Math.sin(lat2*r) - Math.sin(lat1*r)*Math.cos(lat2*r)*Math.cos(dL);
+  return (Math.atan2(y,x)/r + 360) % 360;
+}
+
+// Smallest angle between two headings (0–180°)
+function hdgDiff(a, b) { return Math.abs(((a-b)+540)%360-180); }
+
 function getStatus(f) {
   if (f.on_ground) return 'GROUND';
-  const ft = f.alt_ft;
-  const vs = f.baro_rate || 0;
-  const near = f.dist < 8;
-  const local = f.dist < 20;
-  if (ft != null && ft < 2500 && near) {
-    if (vs >  150) return 'DEPARTING';
+
+  const ft  = f.alt_ft;
+  const vs  = f.baro_rate || 0;   // ft/min
+  const trk = f.track    || 0;
+
+  // Bearing from aircraft to our airport, and how aligned the track is
+  const brg    = bearingTo(f.lat, f.lon, CFG.lat, CFG.lon);
+  const toward = hdgDiff(trk, brg) < 50;   // nose pointing at us (±50°)
+  const away   = hdgDiff(trk, brg) > 120;  // nose pointing away (>120° off)
+
+  // Pull destination from route cache if enrichment has already run
+  const cached  = f.callsign ? routeCache.get(f.callsign) : null;
+  const dest    = cached?.dest || null;                         // IATA or ICAO string
+  // Does the cached destination match our airport?
+  const icaoUs  = CFG.icao;                                    // e.g. "KSEZ"
+  const iataUs  = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao; // e.g. "SEZ"
+  const destHere      = dest && (dest === icaoUs || dest === iataUs);
+  const destElsewhere = dest && !destHere;   // known destination, NOT us
+
+  // ── Pattern / very close (< 5 nm, low) ──────────────────────────────────
+  if (f.dist < 5 && ft != null && ft < 4000) {
+    if (vs >  200) return 'DEPARTING';
     if (vs < -150) return 'ARRIVING';
     return 'PATTERN';
   }
-  if (local) {
-    if (vs >  150) return 'DEPARTING';
-    if (vs < -150) return 'ARRIVING';
+
+  // ── Close range (5–15 nm) ────────────────────────────────────────────────
+  if (f.dist < 15) {
+    // Heading toward us + descending + reasonably low → ARRIVING
+    // But NOT if we know for sure it's going somewhere else
+    if (!destElsewhere && toward && ft != null && ft < 8000 && vs < -150)
+      return 'ARRIVING';
+    // Heading away + climbing → just departed
+    if (away && vs > 300 && ft != null && ft < 10000)
+      return 'DEPARTING';
+    // Low, slow, level-ish → in the pattern
+    if (ft != null && ft < 3500 && Math.abs(vs) < 300)
+      return 'PATTERN';
   }
+
+  // ── Medium range (15–25 nm) ─────────────────────────────────────────────
+  if (f.dist < 25) {
+    // Only call ARRIVING if route confirms destination is us, OR aircraft
+    // is heading directly toward us AND descending AND below 6000 ft
+    if (destHere && vs < -200)
+      return 'ARRIVING';
+    if (!destElsewhere && toward && ft != null && ft < 6000 && vs < -300)
+      return 'ARRIVING';
+    // Climbing away from our position → recently departed
+    if (away && vs > 400 && ft != null && ft < 12000)
+      return 'DEPARTING';
+  }
+
   return 'OVERFLY';
 }
 
@@ -751,7 +806,6 @@ async function fetchFlights() {
 
 // ── ROUTE ENRICHMENT (adsbdb.com, free, no key) ──────────────────────────
 // Cache: callsign → {orig, dest} or null (null = lookup attempted, no data)
-const routeCache = new Map();
 
 async function fetchRoute(callsign) {
   if (routeCache.has(callsign)) return routeCache.get(callsign);
