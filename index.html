@@ -304,6 +304,7 @@ const CFG = {
   lon:  QS.get('lon')  ? parseFloat(QS.get('lon'))  : null,
   name: QS.get('name') || null,
   tz:   null,
+  elev: 0,    // airport elevation MSL (ft) — set during init
 };
 
 // ── AIRPORT DATABASE ──────────────────────────────────────────────────────
@@ -564,6 +565,55 @@ function getTzAbbr(tz) {
   } catch(e) { return ''; }
 }
 
+// ── AIRPORT ELEVATIONS (ft MSL) ───────────────────────────────────────────
+// Critical for AGL at high-elevation airports. KSEZ = 4827 ft — an aircraft
+// at 8000 ft MSL here is only 3173 ft AGL, not 8000.
+const ELEVATIONS = {
+  KSEZ:4827,KPHX:1135,KSDL:1510,KFFZ:1394,KGYR:968,KDVT:1478,
+  KTUS:2643,KPRC:5045,KFLG:7014,KIWA:1382,KCHD:1243,KCGZ:1464,
+  KCMA:77,KSBA:13,KLAX:125,KSFO:13,KSJC:62,KOAK:9,KSNA:56,
+  KSAN:17,KBUR:778,KLGB:60,KVNY:802,KCCR:26,KSTS:128,KSMF:27,
+  KFAT:336,KMRY:257,KPSP:477,KONT:944,KTOA:103,KCNO:650,KRAL:819,
+  KSBP:212,KOXR:45,KPRB:836,KWJF:2351,KAVX:1602,
+  KLAS:2181,KRNO:4415,KHND:2492,KVGT:2205,
+  KDFW:607,KDAL:487,KAUS:542,KHOU:46,KIAH:97,KSAT:809,KAMA:3607,KELP:3962,
+  KORD:672,KMDW:619,KDPA:758,
+  KJFK:13,KLGA:22,KEWR:18,KTEB:9,KHPN:439,
+  KMIA:8,KMCO:96,KTPA:26,KFLL:64,KPBI:19,KAPF:8,KSRQ:30,KORL:96,KSFB:55,KRSW:30,
+  KSEA:433,KBFI:21,KRNT:31,KPAE:606,
+  KDEN:5431,KCOS:6187,KASE:7820,KEGE:6548,KHDN:6606,KGJT:4858,
+  KPDX:26,KEUG:374,KOTH:17,
+  KSLC:4227,KOGD:4473,KPVU:4497,KSGU:2941,KCDC:5622,
+  KATL:1026,KPDK:1003,KRYY:1040,
+  KCLT:748,KRDU:435,KAVL:2165,
+  KIAD:313,KDCA:15,KRIC:167,
+  KBOS:19,KORH:1009,KBED:133,
+  KPHL:36,KPIT:1204,
+  KDTW:645,KGRR:794,KPTK:980,
+  KMSP:841,KSTP:705,
+  KSTL:618,KMCI:1026,
+  KCMH:815,KCLE:791,KLUK:483,KCVG:896,KDAY:1009,
+  KBNA:599,KMEM:332,KTYS:981,
+  KMSY:4,KBTR:70,KBWI:146,
+  PHNL:13,PHOG:54,PHKO:47,PHLI:153,
+  PANC:152,PAFA:439,
+  KABQ:5352,KSAF:6348,KROW:3671,
+  KBZN:4473,KGTF:3677,KBIL:3652,KHLN:3877,KMSO:3206,
+  KBOI:2871,KTWF:4151,
+  KJAC:6451,KCPR:5350,
+  KCHS:46,KMYR:25,
+  KBHM:644,KHSV:629,KMOB:219,
+  KIND:797,KFWA:815,
+  KMKE:723,KMSN:887,KATW:918,
+  KOMA:984,KLNK:1219,
+  KDSM:958,KCID:869,
+  KOKC:1295,KTUL:677,
+  KLIT:262,KSDF:501,KLEX:979,KCRW:981,
+  KBDL:173,KPVD:55,KPWM:76,KBGR:192,KMHT:266,KBTV:335,KILG:72,
+  KBIS:1661,KFAR:902,KRAP:3202,KFSD:1429,
+  KICT:1333,KTOP:881,KJAN:346,KGPT:28,
+};
+
 // ── UTILS ─────────────────────────────────────────────────────────────────
 function distNm(lat1, lon1, lat2, lon2) {
   const R = 3440.065, dLat = (lat2-lat1)*Math.PI/180, dLon = (lon2-lon1)*Math.PI/180;
@@ -574,71 +624,85 @@ function distNm(lat1, lon1, lat2, lon2) {
 // Route cache declared here so getStatus can read it
 const routeCache = new Map();
 
-// Compass bearing from point A to point B (0–360°)
+// Compass bearing from point A → B (0–360°)
 function bearingTo(lat1, lon1, lat2, lon2) {
-  const r = Math.PI/180;
-  const dL = (lon2-lon1)*r;
-  const y  = Math.sin(dL)*Math.cos(lat2*r);
-  const x  = Math.cos(lat1*r)*Math.sin(lat2*r) - Math.sin(lat1*r)*Math.cos(lat2*r)*Math.cos(dL);
+  const r = Math.PI/180, dL = (lon2-lon1)*r;
+  const y = Math.sin(dL)*Math.cos(lat2*r);
+  const x = Math.cos(lat1*r)*Math.sin(lat2*r) - Math.sin(lat1*r)*Math.cos(lat2*r)*Math.cos(dL);
   return (Math.atan2(y,x)/r + 360) % 360;
 }
 
 // Smallest angle between two headings (0–180°)
 function hdgDiff(a, b) { return Math.abs(((a-b)+540)%360-180); }
 
+// ── STATUS DETERMINATION ──────────────────────────────────────────────────
+// Always conservative — prefers OVERFLY when uncertain.
+//
+// Works in AGL above AIRPORT elevation, not MSL. This is essential:
+// KSEZ is at 4827 ft MSL. A 737 at FL080 is only 3173 ft AGL here —
+// exactly on a 10nm approach slope. Without this correction it looks
+// like a high cruiser.
+//
+// ARRIVING  — heading ±40° toward airport, descending >200 fpm, AND
+//             AGL fits the approach corridor (200–530 ft per nm away):
+//             200 ft/nm ≈ 1.9° floor, 530 ft/nm ≈ 5° ceiling.
+//             Route cache blocks it if destination is known elsewhere.
+// PATTERN   — <5 nm, low AGL, not committed climb/dive, slow speed.
+//             Checked first to avoid chime-spamming touch-and-goes.
+//             On-final sub-case (toward + descending) returns ARRIVING.
+// DEPARTING — <15 nm, low AGL (<5000 ft), climbing >400 fpm,
+//             heading >100° away, airborne speed >60 kt.
+// OVERFLY   — everything else.
+
 function getStatus(f) {
   if (f.on_ground) return 'GROUND';
 
-  const ft  = f.alt_ft;
-  const vs  = f.baro_rate || 0;   // ft/min
-  const trk = f.track    || 0;
+  const elev = CFG.elev || 0;
+  const agl  = f.alt_ft != null ? f.alt_ft - elev : null; // ft above airport elevation
+  const vs   = f.baro_rate || 0;                           // fpm
+  const spd  = f.gs || 0;                                  // kt
 
-  // Bearing from aircraft to our airport, and how aligned the track is
   const brg    = bearingTo(f.lat, f.lon, CFG.lat, CFG.lon);
-  const toward = hdgDiff(trk, brg) < 50;   // nose pointing at us (±50°)
-  const away   = hdgDiff(trk, brg) > 120;  // nose pointing away (>120° off)
+  const diff   = hdgDiff(f.track || 0, brg);
+  const toward = diff < 40;   // nose within 40° of direct bearing to us
+  const away   = diff > 100;  // clearly not heading toward us
 
-  // Pull destination from route cache if enrichment has already run
-  const cached  = f.callsign ? routeCache.get(f.callsign) : null;
-  const dest    = cached?.dest || null;                         // IATA or ICAO string
-  // Does the cached destination match our airport?
-  const icaoUs  = CFG.icao;                                    // e.g. "KSEZ"
-  const iataUs  = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao; // e.g. "SEZ"
-  const destHere      = dest && (dest === icaoUs || dest === iataUs);
-  const destElsewhere = dest && !destHere;   // known destination, NOT us
+  const cached        = f.callsign ? routeCache.get(f.callsign) : null;
+  const dest          = cached?.dest || null;
+  const iataUs        = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
+  const destHere      = dest && (dest === CFG.icao || dest === iataUs);
+  const destElsewhere = dest && !destHere;
 
-  // ── Pattern / very close (< 5 nm, low) ──────────────────────────────────
-  if (f.dist < 5 && ft != null && ft < 4000) {
-    if (vs >  200) return 'DEPARTING';
-    if (vs < -150) return 'ARRIVING';
-    return 'PATTERN';
+  // ── PATTERN (<5 nm) ───────────────────────────────────────────────────────
+  if (f.dist < 5 && agl != null && agl >= 0 && agl < 2500
+      && Math.abs(vs) < 600 && spd < 200 && !destElsewhere) {
+    if (toward && vs < -150) return 'ARRIVING'; // on final
+    return 'PATTERN';                            // flying the box
   }
 
-  // ── Close range (5–15 nm) ────────────────────────────────────────────────
-  if (f.dist < 15) {
-    // Heading toward us + descending + reasonably low → ARRIVING
-    // But NOT if we know for sure it's going somewhere else
-    if (!destElsewhere && toward && ft != null && ft < 8000 && vs < -150)
-      return 'ARRIVING';
-    // Heading away + climbing → just departed
-    if (away && vs > 300 && ft != null && ft < 10000)
-      return 'DEPARTING';
-    // Low, slow, level-ish → in the pattern
-    if (ft != null && ft < 3500 && Math.abs(vs) < 300)
-      return 'PATTERN';
+  // ── ARRIVING (5–20 nm) ───────────────────────────────────────────────────
+  if (!destElsewhere && f.dist >= 5 && f.dist < 20) {
+    // Glidepath corridor: 200 ft/nm floor (1.9°) to 530 ft/nm ceiling (5°)
+    const floor   = f.dist * 200;
+    const ceiling = f.dist * 530;
+    const onSlope = agl != null && agl >= floor && agl <= ceiling;
+    if (toward && vs < -200 && onSlope) return 'ARRIVING';
   }
 
-  // ── Medium range (15–25 nm) ─────────────────────────────────────────────
-  if (f.dist < 25) {
-    // Only call ARRIVING if route confirms destination is us, OR aircraft
-    // is heading directly toward us AND descending AND below 6000 ft
-    if (destHere && vs < -200)
-      return 'ARRIVING';
-    if (!destElsewhere && toward && ft != null && ft < 6000 && vs < -300)
-      return 'ARRIVING';
-    // Climbing away from our position → recently departed
-    if (away && vs > 400 && ft != null && ft < 12000)
-      return 'DEPARTING';
+  // ── ARRIVING (20–30 nm, tight criteria) ──────────────────────────────────
+  if (f.dist >= 20 && f.dist < 30) {
+    if (destHere && vs < -150) return 'ARRIVING'; // route confirms us
+    if (!destElsewhere) {
+      const ceiling = f.dist * 530;
+      const onSlope = agl != null && agl > 0 && agl <= ceiling;
+      if (diff < 25 && vs < -300 && onSlope) return 'ARRIVING'; // very tight heading
+    }
+  }
+
+  // ── DEPARTING (<15 nm) ───────────────────────────────────────────────────
+  if (f.dist < 15 && agl != null && agl >= 0 && agl < 5000
+      && vs > 400 && away && spd > 60) {
+    return 'DEPARTING';
   }
 
   return 'OVERFLY';
@@ -680,18 +744,22 @@ function goToIcao() {
 // ── AIRPORT LOOKUP ────────────────────────────────────────────────────────
 async function lookupAirport(icao) {
   // 1. Built-in DB
-  if (AIRPORTS[icao]) return AIRPORTS[icao];
-  // 2. aviationweather.gov API
+  if (AIRPORTS[icao]) return { ...AIRPORTS[icao], elev: ELEVATIONS[icao] || 0 };
+  // 2. aviationweather.gov API (returns elev in feet)
   try {
     const r = await fetch(`https://aviationweather.gov/api/data/airport?ids=${icao}&format=json`, {signal: AbortSignal.timeout(8000)});
     if (r.ok) {
       const d = await r.json();
       if (Array.isArray(d) && d.length && d[0].lat != null) {
-        return { lat: parseFloat(d[0].lat), lon: parseFloat(d[0].lon), name: d[0].name || icao };
+        return {
+          lat:  parseFloat(d[0].lat),
+          lon:  parseFloat(d[0].lon),
+          name: d[0].name || icao,
+          elev: parseFloat(d[0].elev) || 0,   // ft MSL from API
+        };
       }
     }
   } catch(e) { console.warn('Airport API fallback failed:', e.message); }
-  // 3. Failed
   return null;
 }
 
@@ -1008,8 +1076,10 @@ async function init() {
     CFG.lat  = ap.lat;
     CFG.lon  = ap.lon;
     CFG.name = CFG.name || ap.name;
+    CFG.elev = ap.elev || ELEVATIONS[CFG.icao] || 0;
   } else {
     CFG.name = CFG.name || CFG.icao;
+    CFG.elev = ELEVATIONS[CFG.icao] || 0;
   }
 
   // Update all name references
