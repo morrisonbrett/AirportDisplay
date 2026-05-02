@@ -1,0 +1,997 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Airport Traffic</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #04060e;
+      --bg2:       #070b17;
+      --bg3:       #0c1222;
+      --bd:        rgba(30,58,100,0.65);
+      --bd2:       #1e3a60;
+      --cyan:      #00c8f0;
+      --cyan-g:    rgba(0,200,240,0.13);
+      --cyan-glo:  0 0 18px rgba(0,200,240,0.45);
+      --green:     #00e87a;
+      --green-g:   rgba(0,232,122,0.13);
+      --green-glo: 0 0 14px rgba(0,232,122,0.5);
+      --amber:     #f0a000;
+      --amber-g:   rgba(240,160,0,0.13);
+      --amber-glo: 0 0 14px rgba(240,160,0,0.5);
+      --purple:    #a070ff;
+      --purple-g:  rgba(160,112,255,0.13);
+      --slate:     #6090b0;
+      --slate-g:   rgba(96,144,176,0.13);
+      --txt:       #e4f4ff;   /* primary — near white-blue, easy to read */
+      --txt2:      #90b8d0;   /* secondary — clearly readable mid-blue    */
+      --txt3:      #5a7a90;   /* tertiary — labels, units, dim info       */
+      --f-disp:    'Orbitron', monospace;
+      --f-data:    'Share Tech Mono', monospace;
+      --f-ui:      'Rajdhani', sans-serif;
+      --hh:  clamp(48px,6vh,72px);
+      --fh:  clamp(28px,3.4vh,44px);
+    }
+
+    html, body { width:100%; height:100%; overflow:hidden; background:var(--bg); color:var(--txt); }
+
+    body::before {
+      content:''; position:fixed; inset:0; pointer-events:none; z-index:9999;
+      background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.035) 3px,rgba(0,0,0,.035) 4px);
+    }
+    body::after {
+      content:''; position:fixed; inset:0; pointer-events:none; z-index:9998;
+      background:radial-gradient(ellipse at 50% 50%,transparent 45%,rgba(0,0,0,.72) 100%);
+    }
+
+    /* ── LOADING ── */
+    #loading {
+      position:fixed; inset:0; z-index:10000; background:var(--bg);
+      display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2.4vh;
+      transition:opacity .7s ease;
+    }
+    #loading.gone { opacity:0; pointer-events:none; }
+    #loading-icao {
+      font-family:var(--f-disp); font-size:clamp(42px,6vw,96px); font-weight:900;
+      color:var(--cyan); letter-spacing:.18em; text-shadow:var(--cyan-glo);
+    }
+    .ld-track { width:clamp(180px,24vw,380px); height:2px; background:var(--bd2); border-radius:1px; overflow:hidden; }
+    .ld-bar   { height:100%; background:var(--cyan); border-radius:1px; animation:lbar 1.6s ease-in-out infinite; }
+    @keyframes lbar { 0%{width:0%;margin-left:0%} 50%{width:55%;margin-left:20%} 100%{width:0%;margin-left:100%} }
+    .ld-txt { font-family:var(--f-ui); font-size:clamp(10px,.9vw,15px); font-weight:600; letter-spacing:.28em; text-transform:uppercase; color:var(--txt3); }
+    #loading-err { font-family:var(--f-data); font-size:clamp(11px,.9vw,15px); color:rgba(240,100,100,.8); display:none; margin-top:.5vh; }
+
+    /* ── HEADER ── */
+    header {
+      position:relative; z-index:10;
+      height:var(--hh); display:flex; align-items:center; gap:1.4vw; padding:0 1.6vw;
+      background:var(--bg2); border-bottom:1px solid var(--bd2); overflow:hidden;
+    }
+    header::after {
+      content:''; position:absolute; bottom:0; left:0; right:0; height:1px;
+      background:linear-gradient(90deg,transparent,var(--cyan) 40%,var(--cyan) 60%,transparent); opacity:.22;
+    }
+    .h-icao { font-family:var(--f-disp); font-weight:900; letter-spacing:.12em; font-size:clamp(18px,2.4vw,38px); color:var(--cyan); text-shadow:var(--cyan-glo); white-space:nowrap; flex-shrink:0; }
+    .h-name { font-family:var(--f-ui); font-weight:600; letter-spacing:.18em; text-transform:uppercase; font-size:clamp(10px,1.1vw,19px); color:var(--txt2); white-space:nowrap; flex-shrink:0; }
+    .vr { width:1px; height:55%; background:var(--bd2); flex-shrink:0; }
+
+    .metar-row { display:flex; align-items:center; gap:.7vw; flex:1; overflow:hidden; flex-shrink:1; min-width:0; }
+    .m-label { font-family:var(--f-ui); font-size:clamp(8px,.65vw,12px); font-weight:700; color:var(--txt3); letter-spacing:.22em; text-transform:uppercase; flex-shrink:0; }
+    .chips { display:flex; gap:.4vw; overflow:hidden; }
+    .chip { display:flex; flex-direction:column; align-items:center; background:rgba(10,16,32,.85); border:1px solid var(--bd); border-radius:3px; padding:1px clamp(5px,.5vw,9px); white-space:nowrap; flex-shrink:0; }
+    .chip-lbl { font-family:var(--f-ui); font-size:clamp(6px,.55vw,10px); color:var(--txt3); letter-spacing:.14em; line-height:1.1; text-transform:uppercase; }
+    .chip-val { font-family:var(--f-data); font-size:clamp(9px,.88vw,15px); color:var(--txt); line-height:1.3; }
+
+    .h-right { display:flex; align-items:center; gap:1vw; flex-shrink:0; margin-left:auto; }
+    .dot { width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:var(--green-glo); animation:blink 2.2s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 55%{opacity:.25} }
+    /* Both clocks share the same base style */
+    .clock { font-family:var(--f-disp); font-weight:400; letter-spacing:.1em; font-size:clamp(15px,1.7vw,27px); color:var(--txt); white-space:nowrap; }
+    .clock-z  { font-size:.58em; color:var(--txt3); margin-left:3px; letter-spacing:.06em; }
+    .clock-sep { width:1px; height:52%; background:var(--bd2); flex-shrink:0; }
+    /* ICAO switcher */
+    .icao-form { display:flex; align-items:center; gap:5px; flex-shrink:0; }
+    .icao-inp  { font-family:var(--f-disp); font-size:clamp(11px,1.05vw,18px); font-weight:700; letter-spacing:.18em; text-transform:uppercase; background:rgba(10,16,32,.9); border:1px solid var(--bd2); border-radius:4px; color:var(--cyan); padding:3px 8px; width:clamp(62px,5.2vw,92px); outline:none; text-align:center; caret-color:var(--cyan); }
+    .icao-inp:focus { border-color:var(--cyan); box-shadow:0 0 0 3px rgba(0,200,240,.3); }  /* thick ring for TV visibility */
+    .icao-inp::placeholder { color:var(--txt3); font-weight:400; letter-spacing:.1em; }
+    .icao-btn  { font-family:var(--f-ui); font-size:clamp(10px,.88vw,15px); font-weight:700; letter-spacing:.14em; text-transform:uppercase; background:rgba(0,200,240,.08); border:1px solid rgba(0,200,240,.22); border-radius:4px; color:var(--cyan); padding:4px 10px; cursor:pointer; white-space:nowrap; transition:background .15s; }
+    .icao-btn:hover, .icao-btn:focus { background:rgba(0,200,240,.22); outline:none; box-shadow:0 0 0 3px rgba(0,200,240,.3); }
+
+    /* ── MAIN ── */
+    main { display:flex; height:calc(100vh - var(--hh) - var(--fh)); overflow:hidden; }
+
+    /* ── FLIGHTS ── */
+    .flights-panel { flex:0 0 57%; display:flex; flex-direction:column; background:var(--bg); border-right:1px solid var(--bd2); overflow:hidden; }
+    .panel-hdr { display:flex; align-items:center; justify-content:space-between; padding:.8vh 1.4vw .7vh; border-bottom:1px solid var(--bd); flex-shrink:0; }
+    .panel-title { font-family:var(--f-ui); font-size:clamp(8px,.68vw,12px); font-weight:700; letter-spacing:.26em; text-transform:uppercase; color:var(--txt3); }
+    .count-badge { font-family:var(--f-data); font-size:clamp(9px,.78vw,13px); letter-spacing:.08em; color:var(--cyan); background:var(--cyan-g); border:1px solid rgba(0,200,240,.18); border-radius:3px; padding:1px 8px; }
+
+    .tbl-wrap { flex:1; overflow-y:auto; overflow-x:hidden; }
+    .tbl-wrap::-webkit-scrollbar { width:3px; }
+    .tbl-wrap::-webkit-scrollbar-thumb { background:var(--bd2); border-radius:2px; }
+
+    table { width:100%; border-collapse:collapse; table-layout:fixed; }
+    thead { position:sticky; top:0; z-index:5; background:var(--bg2); }
+    thead th { font-family:var(--f-ui); font-size:clamp(8px,.72vw,13px); font-weight:700; letter-spacing:.2em; text-transform:uppercase; color:var(--txt2); padding:.7vh .9vw; border-bottom:1px solid var(--bd); text-align:left; }
+    th.r, td.r { text-align:right; }
+    th.c, td.c { text-align:center; }
+
+    .c-id   { width:16%; }
+    .c-type { width:19%; }
+    .c-route{ width:13%; }
+    .c-alt  { width:13%; }
+    .c-spd  { width:8%;  }
+    .c-hdg  { width:6%;  }
+    .c-dist { width:8%;  }
+    .c-sta  { width:17%; }
+
+    .frow { border-bottom:1px solid rgba(30,58,100,.4); animation:rowIn .35s ease-out; }
+    @keyframes rowIn { from{opacity:0;transform:translateX(-6px)} to{opacity:1;transform:none} }
+    .frow.gnd { opacity:.55; }
+    td { padding:1.1vh .9vw; vertical-align:middle; }
+
+    .td-id   { font-family:var(--f-data); font-size:clamp(13px,1.4vw,22px); color:var(--cyan); letter-spacing:.06em; line-height:1.1; }
+    .td-sub  { font-family:var(--f-ui); font-size:clamp(9px,.78vw,13px); color:var(--txt2); letter-spacing:.06em; }
+    .td-type { font-family:var(--f-ui); font-weight:600; font-size:clamp(13px,1.25vw,21px); color:var(--txt); letter-spacing:.04em; line-height:1.15; }
+    .td-mfr  { font-family:var(--f-ui); font-size:clamp(10px,.88vw,15px); color:var(--txt2); line-height:1.2; }
+    .td-num  { font-family:var(--f-data); font-size:clamp(12px,1.25vw,20px); color:var(--txt); }
+    .td-unit { font-family:var(--f-ui); font-size:clamp(8px,.68vw,12px); color:var(--txt3); margin-left:2px; }
+    .td-route-orig { font-family:var(--f-data); font-size:clamp(11px,1.1vw,17px); color:var(--txt2); letter-spacing:.04em; line-height:1.2; }
+    .td-route-arr  { font-family:var(--f-ui);  font-size:clamp(8px,.68vw,11px); color:var(--txt3); letter-spacing:.06em; }
+    .td-route-dest { font-family:var(--f-data); font-size:clamp(11px,1.1vw,17px); color:var(--txt); letter-spacing:.04em; }
+
+    .alt-wrap { display:flex; align-items:center; gap:3px; justify-content:flex-end; }
+    .alt-bar  { width:clamp(16px,1.8vw,30px); height:3px; background:var(--bd); border-radius:2px; overflow:hidden; flex-shrink:0; }
+    .alt-fill { height:100%; border-radius:2px; background:linear-gradient(90deg,rgba(0,200,240,.3),var(--cyan)); }
+
+    .hdg-sym { display:inline-block; font-size:clamp(14px,1.4vw,22px); color:var(--txt2); line-height:1; }
+
+    .badge { display:inline-flex; align-items:center; gap:4px; font-family:var(--f-ui); font-weight:700; letter-spacing:.14em; text-transform:uppercase; font-size:clamp(8px,.72vw,12px); border-radius:3px; white-space:nowrap; padding:clamp(2px,.25vh,4px) clamp(5px,.45vw,9px); border-width:1px; border-style:solid; }
+    .badge::before { content:''; width:5px; height:5px; border-radius:50%; flex-shrink:0; }
+    .ARR { color:var(--green);  background:var(--green-g);  border-color:rgba(0,232,122,.22); }
+    .ARR::before { background:var(--green);  box-shadow:var(--green-glo); }
+    .DEP { color:var(--amber);  background:var(--amber-g);  border-color:rgba(240,160,0,.22); }
+    .DEP::before { background:var(--amber);  box-shadow:var(--amber-glo); }
+    .PAT { color:var(--purple); background:var(--purple-g); border-color:rgba(144,96,240,.22); }
+    .PAT::before { background:var(--purple); }
+    .OVR { color:#4a90d8;       background:rgba(74,144,216,.12); border-color:rgba(74,144,216,.22); }
+    .OVR::before { background:#4a90d8; }
+    .GND { color:var(--slate);  background:var(--slate-g);  border-color:rgba(74,112,144,.2); }
+    .GND::before { background:var(--slate); }
+
+    .empty { display:none; flex-direction:column; align-items:center; justify-content:center; flex:1; gap:2.5vh; padding:4vh 2vw; }
+    .empty.on { display:flex; }
+    .e-ring { width:clamp(70px,9vw,140px); height:clamp(70px,9vw,140px); border:1px solid rgba(0,200,240,.18); border-radius:50%; position:relative; animation:ringp 3.5s ease-in-out infinite; }
+    .e-ring::after { content:''; position:absolute; inset:20%; border:1px solid rgba(0,200,240,.09); border-radius:50%; }
+    @keyframes ringp { 0%,100%{box-shadow:0 0 0 0 rgba(0,200,240,0)} 50%{box-shadow:0 0 0 12px rgba(0,200,240,.05)} }
+    .e-lbl { font-family:var(--f-ui); font-size:clamp(11px,.9vw,16px); font-weight:600; color:var(--txt3); letter-spacing:.28em; text-transform:uppercase; }
+    .e-sub { font-family:var(--f-data); font-size:clamp(8px,.7vw,12px); color:var(--txt3); opacity:.55; }
+
+    /* ── MAP ── */
+    .map-panel { flex:1; position:relative; background:#030508; }
+    #map { position:absolute; inset:0; z-index:1; }
+
+    .sweep { position:absolute; inset:0; z-index:400; pointer-events:none; overflow:hidden; }
+    .sweep-cone { position:absolute; inset:0; animation:swp 9s linear infinite; background:conic-gradient(from 0deg,transparent 320deg,rgba(0,232,122,.04) 345deg,rgba(0,232,122,.18) 360deg); }
+    @keyframes swp { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+
+    .map-lbl { position:absolute; bottom:10px; left:10px; z-index:500; pointer-events:none; font-family:var(--f-ui); font-size:clamp(8px,.7vw,12px); font-weight:700; letter-spacing:.2em; text-transform:uppercase; color:rgba(180,220,240,.4); }
+
+    .leaflet-control-attribution { background:rgba(4,6,14,.85)!important; color:rgba(80,104,120,.55)!important; font-size:7px!important; }
+    .leaflet-control-attribution a { color:rgba(80,104,120,.55)!important; }
+    .leaflet-control-zoom a { background:var(--bg2)!important; border-color:var(--bd2)!important; color:var(--txt2)!important; }
+    .leaflet-control-zoom a:hover { background:var(--bg3)!important; color:var(--cyan)!important; }
+    .leaflet-popup-content-wrapper { background:var(--bg2)!important; border:1px solid var(--bd2)!important; border-radius:4px!important; box-shadow:0 6px 24px rgba(0,0,0,.9)!important; color:var(--txt)!important; font-family:var(--f-data)!important; font-size:11px!important; }
+    .leaflet-popup-tip { background:var(--bd2)!important; }
+    .leaflet-popup-close-button { color:var(--txt2)!important; }
+
+    /* ── FOOTER ── */
+    footer { position:relative; z-index:10; height:var(--fh); display:flex; align-items:center; gap:1.8vw; padding:0 1.6vw; background:var(--bg2); border-top:1px solid var(--bd); overflow:hidden; }
+    footer::before { content:''; position:absolute; top:0; left:0; right:0; height:1px; background:linear-gradient(90deg,transparent,var(--bd2),transparent); }
+    .fi { font-family:var(--f-ui); font-size:clamp(7px,.62vw,11px); letter-spacing:.15em; text-transform:uppercase; color:var(--txt3); white-space:nowrap; }
+    .fi span { color:var(--txt2); }
+    .fi-err { color:rgba(240,100,100,.75); font-family:var(--f-data); font-size:clamp(7px,.62vw,11px); max-width:40vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .fi-sp { flex:1; }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  <div id="loading-icao">—</div>
+  <div class="ld-track"><div class="ld-bar"></div></div>
+  <div class="ld-txt" id="loading-msg">Connecting to airspace</div>
+  <div id="loading-err"></div>
+</div>
+
+<header>
+  <div class="h-icao" id="h-icao">—</div>
+  <div class="vr"></div>
+  <div class="h-name" id="h-name">—</div>
+  <div class="vr"></div>
+  <div class="metar-row">
+    <div class="m-label">ATIS</div>
+    <div class="chips">
+      <div class="chip"><span class="chip-lbl">Wind</span>  <span class="chip-val" id="m-wind">—</span></div>
+      <div class="chip"><span class="chip-lbl">Vis</span>   <span class="chip-val" id="m-vis">—</span></div>
+      <div class="chip"><span class="chip-lbl">Sky</span>   <span class="chip-val" id="m-sky">—</span></div>
+      <div class="chip"><span class="chip-lbl">Temp</span>  <span class="chip-val" id="m-temp">—</span></div>
+      <div class="chip"><span class="chip-lbl">Altim</span><span class="chip-val" id="m-altim">—</span></div>
+      <div class="chip"><span class="chip-lbl">Rules</span><span class="chip-val" id="m-fr" style="color:var(--green)">—</span></div>
+    </div>
+  </div>
+  <div class="vr"></div>
+  <div class="icao-form">
+    <input id="icao-inp" class="icao-inp" type="text" maxlength="4" placeholder="ICAO" autocomplete="off" spellcheck="false">
+    <button class="icao-btn" id="icao-btn">Go</button>
+  </div>
+  <div class="h-right">
+    <div class="dot" id="dot"></div>
+    <div class="clock" id="clock-local">—<span class="clock-z" id="clock-local-tz"></span></div>
+    <div class="clock-sep"></div>
+    <div class="clock" id="clock">00:00:00<span class="clock-z">Z</span></div>
+  </div>
+</header>
+
+<main>
+  <section class="flights-panel">
+    <div class="panel-hdr">
+      <div class="panel-title">Aircraft In Area</div>
+      <div class="count-badge" id="badge">0 AIRCRAFT</div>
+    </div>
+    <div class="tbl-wrap" id="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="c-id">Callsign / Reg</th>
+            <th class="c-type">Type</th>
+            <th class="c-route">Route</th>
+            <th class="c-alt r">Altitude</th>
+            <th class="c-spd r">Speed</th>
+            <th class="c-hdg c">Hdg</th>
+            <th class="c-dist r">Dist</th>
+            <th class="c-sta c">Status</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty">
+      <div class="e-ring"></div>
+      <div class="e-lbl">Scanning Airspace</div>
+      <div class="e-sub">No aircraft detected within range</div>
+    </div>
+  </section>
+
+  <section class="map-panel">
+    <div id="map"></div>
+    <div class="sweep"><div class="sweep-cone"></div></div>
+    <div class="map-lbl" id="map-lbl">—</div>
+  </section>
+</main>
+
+<footer>
+  <div class="fi">Source · <span>airplanes.live</span></div>
+  <div class="fi">Radius · <span id="f-radius">—</span> nm</div>
+  <div class="fi"><span id="f-count">—</span> aircraft</div>
+  <div class="fi-sp"></div>
+  <div class="fi-err" id="f-err"></div>
+  <div class="fi">Updated · <span id="f-upd">—</span></div>
+  <div class="fi">Auto-refresh · <span>30s</span></div>
+</footer>
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────────
+const QS = new URLSearchParams(location.search);
+const CFG = {
+  icao:     (QS.get('icao') || 'KSEZ').toUpperCase(),
+  radiusNm: parseInt(QS.get('radius') || '30'),
+  refresh:  30000,
+  lat:  QS.get('lat')  ? parseFloat(QS.get('lat'))  : null,
+  lon:  QS.get('lon')  ? parseFloat(QS.get('lon'))  : null,
+  name: QS.get('name') || null,
+  tz:   null,
+};
+
+// ── AIRPORT DATABASE ──────────────────────────────────────────────────────
+// Covers ~200 airports. For any not listed, falls back to aviationweather.gov API.
+// You can also pass ?icao=KXXX&lat=XX.XX&lon=-XXX.XX&name=My+Airport in the URL.
+const AIRPORTS = {
+  // Arizona
+  KSEZ:{lat:34.8486,lon:-111.7897,name:'Sedona Airport'},
+  KPHX:{lat:33.4373,lon:-112.0078,name:'Phoenix Sky Harbor'},
+  KSDL:{lat:33.6229,lon:-111.9105,name:'Scottsdale Airport'},
+  KFFZ:{lat:33.4608,lon:-111.7280,name:'Falcon Field'},
+  KGYR:{lat:33.4225,lon:-112.3763,name:'Phoenix Goodyear'},
+  KDVT:{lat:33.6883,lon:-112.0827,name:'Phoenix Deer Valley'},
+  KTUS:{lat:32.1161,lon:-110.9410,name:'Tucson Intl'},
+  KPRC:{lat:34.6546,lon:-112.4197,name:'Prescott Regional'},
+  KFLG:{lat:35.1385,lon:-111.6709,name:'Flagstaff Pulliam'},
+  KIWA:{lat:33.3079,lon:-111.6549,name:'Phoenix-Mesa Gateway'},
+  KCHD:{lat:33.2692,lon:-111.8169,name:'Chandler Municipal'},
+  KCGZ:{lat:32.9548,lon:-111.7658,name:'Casa Grande Municipal'},
+  // California
+  KCMA:{lat:34.2137,lon:-119.0944,name:'Camarillo Airport'},
+  KSBA:{lat:34.4262,lon:-119.8400,name:'Santa Barbara Airport'},
+  KLAX:{lat:33.9425,lon:-118.4081,name:'Los Angeles Intl'},
+  KSFO:{lat:37.6213,lon:-122.3790,name:'San Francisco Intl'},
+  KSJC:{lat:37.3626,lon:-121.9290,name:'San Jose Intl'},
+  KOAK:{lat:37.7213,lon:-122.2208,name:'Oakland Intl'},
+  KSNA:{lat:33.6757,lon:-117.8682,name:'John Wayne Airport'},
+  KSAN:{lat:32.7336,lon:-117.1897,name:'San Diego Intl'},
+  KBUR:{lat:34.2007,lon:-118.3588,name:'Hollywood Burbank'},
+  KLGB:{lat:33.8177,lon:-118.1516,name:'Long Beach Airport'},
+  KVNY:{lat:34.2098,lon:-118.4899,name:'Van Nuys Airport'},
+  KCCR:{lat:37.9897,lon:-122.0568,name:'Buchanan Field'},
+  KSTS:{lat:38.5090,lon:-122.8129,name:'Sonoma County Airport'},
+  KSMF:{lat:38.6954,lon:-121.5908,name:'Sacramento Intl'},
+  KFAT:{lat:36.7762,lon:-119.7182,name:'Fresno Yosemite Intl'},
+  KMRY:{lat:36.5870,lon:-121.8430,name:'Monterey Regional'},
+  KPSP:{lat:33.8297,lon:-116.5067,name:'Palm Springs Intl'},
+  KONT:{lat:34.0560,lon:-117.6012,name:'Ontario Intl'},
+  KTOA:{lat:33.8033,lon:-118.3396,name:'Zamperini Field Torrance'},
+  KCNO:{lat:33.9745,lon:-117.6372,name:'Chino Airport'},
+  KRAL:{lat:33.9519,lon:-117.4452,name:'Riverside Municipal'},
+  KSBP:{lat:35.2368,lon:-120.6425,name:'San Luis Obispo County'},
+  KOXR:{lat:34.2008,lon:-119.2073,name:'Oxnard Airport'},
+  KPRB:{lat:35.6731,lon:-120.6274,name:'Paso Robles Municipal'},
+  KWJF:{lat:34.7411,lon:-118.2192,name:'General WJ Fox Airfield'},
+  KAVX:{lat:33.4049,lon:-118.4156,name:'Catalina Airport'},
+  // Nevada
+  KLAS:{lat:36.0840,lon:-115.1522,name:'Harry Reid Intl'},
+  KRNO:{lat:39.4991,lon:-119.7681,name:'Reno-Tahoe Intl'},
+  KHND:{lat:35.9719,lon:-115.1343,name:'Henderson Executive'},
+  KVGT:{lat:36.2107,lon:-115.1944,name:'North Las Vegas Airport'},
+  KBOU:{lat:37.7999,lon:-117.9592,name:'Beatty Airport'},
+  // Texas
+  KDFW:{lat:32.8998,lon:-97.0403, name:'Dallas/Fort Worth Intl'},
+  KDAL:{lat:32.8471,lon:-96.8517, name:'Dallas Love Field'},
+  KAUS:{lat:30.1945,lon:-97.6699, name:'Austin-Bergstrom Intl'},
+  KHOU:{lat:29.6454,lon:-95.2789, name:'William P. Hobby'},
+  KIAH:{lat:29.9902,lon:-95.3368, name:'George Bush Intercontinental'},
+  KSAT:{lat:29.5337,lon:-98.4698, name:'San Antonio Intl'},
+  KAMA:{lat:35.2194,lon:-101.7063,name:'Rick Husband Amarillo Intl'},
+  KELP:{lat:31.8072,lon:-106.3777,name:'El Paso Intl'},
+  // Illinois
+  KORD:{lat:41.9742,lon:-87.9073, name:"O'Hare Intl"},
+  KMDW:{lat:41.7859,lon:-87.7524, name:'Chicago Midway'},
+  KDPA:{lat:41.9077,lon:-88.2486, name:'DuPage Airport'},
+  // New York
+  KJFK:{lat:40.6413,lon:-73.7781, name:'John F. Kennedy Intl'},
+  KLGA:{lat:40.7773,lon:-73.8726, name:'LaGuardia'},
+  KEWR:{lat:40.6895,lon:-74.1745, name:'Newark Liberty Intl'},
+  KTEB:{lat:40.8501,lon:-74.0608, name:'Teterboro Airport'},
+  KHPN:{lat:41.0670,lon:-73.7076, name:'Westchester County'},
+  // Florida
+  KMIA:{lat:25.7959,lon:-80.2870, name:'Miami Intl'},
+  KMCO:{lat:28.4294,lon:-81.3089, name:'Orlando Intl'},
+  KTPA:{lat:27.9755,lon:-82.5332, name:'Tampa Intl'},
+  KFLL:{lat:26.0726,lon:-80.1527, name:'Fort Lauderdale Intl'},
+  KPBI:{lat:26.6832,lon:-80.0956, name:'Palm Beach Intl'},
+  KAPF:{lat:26.1526,lon:-81.7752, name:'Naples Municipal'},
+  KSRQ:{lat:27.3953,lon:-82.5544, name:'Sarasota-Bradenton Intl'},
+  KORL:{lat:28.5455,lon:-81.3329, name:'Orlando Executive'},
+  KSFB:{lat:28.7776,lon:-81.2375, name:'Orlando Sanford Intl'},
+  KRSW:{lat:26.5362,lon:-81.7552, name:'Southwest Florida Intl'},
+  // Washington
+  KSEA:{lat:47.4502,lon:-122.3088,name:'Seattle-Tacoma Intl'},
+  KBFI:{lat:47.5300,lon:-122.3019,name:'Boeing Field'},
+  KRNT:{lat:47.4930,lon:-122.2161,name:'Renton Municipal'},
+  KSHN:{lat:46.9680,lon:-123.1482,name:'Sanderson Field'},
+  KPAE:{lat:47.9063,lon:-122.2817,name:'Paine Field'},
+  // Colorado
+  KDEN:{lat:39.8561,lon:-104.6737,name:'Denver Intl'},
+  KCOS:{lat:38.8059,lon:-104.7008,name:'Colorado Springs Airport'},
+  KASE:{lat:39.2233,lon:-106.8688,name:'Aspen Pitkin County'},
+  KEGE:{lat:39.6426,lon:-106.9177,name:'Eagle County Regional'},
+  KHDN:{lat:40.4812,lon:-107.2181,name:'Yampa Valley Regional'},
+  KGJT:{lat:39.1224,lon:-108.5268,name:'Grand Junction Regional'},
+  // Oregon
+  KPDX:{lat:45.5887,lon:-122.5975,name:'Portland Intl'},
+  KEUG:{lat:44.1246,lon:-123.2119,name:'Eugene Airport'},
+  KOTH:{lat:43.4171,lon:-124.2458,name:'Southwest Oregon Regional'},
+  // Utah
+  KSLC:{lat:40.7884,lon:-111.9778,name:'Salt Lake City Intl'},
+  KOGD:{lat:41.1960,lon:-112.0122,name:'Ogden-Hinckley'},
+  KPVU:{lat:40.2192,lon:-111.7237,name:'Provo Municipal'},
+  KSGU:{lat:37.0286,lon:-113.5102,name:'St. George Regional'},
+  KCDC:{lat:37.7010,lon:-113.0988,name:'Cedar City Regional'},
+  // Georgia
+  KATL:{lat:33.6407,lon:-84.4277, name:'Hartsfield-Jackson Atlanta Intl'},
+  KPDK:{lat:33.8756,lon:-84.3020, name:'DeKalb-Peachtree'},
+  KRYY:{lat:34.0132,lon:-84.5996, name:'McCollum Field'},
+  // North Carolina
+  KCLT:{lat:35.2140,lon:-80.9431, name:'Charlotte Douglas Intl'},
+  KRDU:{lat:35.8776,lon:-78.7875, name:'Raleigh-Durham Intl'},
+  KAVL:{lat:35.4362,lon:-82.5419, name:'Asheville Regional'},
+  // Virginia
+  KIAD:{lat:38.9445,lon:-77.4558, name:'Washington Dulles Intl'},
+  KDCA:{lat:38.8521,lon:-77.0377, name:'Reagan National'},
+  KRIC:{lat:37.5052,lon:-77.3197, name:'Richmond Intl'},
+  // Massachusetts
+  KBOS:{lat:42.3656,lon:-71.0096, name:'Boston Logan Intl'},
+  KORH:{lat:42.2673,lon:-71.8757, name:'Worcester Regional'},
+  KBED:{lat:42.4700,lon:-71.2889, name:'Hanscom Field Bedford'},
+  // Pennsylvania
+  KPHL:{lat:39.8719,lon:-75.2411, name:'Philadelphia Intl'},
+  KPIT:{lat:40.4915,lon:-80.2329, name:'Pittsburgh Intl'},
+  // Michigan
+  KDTW:{lat:42.2124,lon:-83.3534, name:'Detroit Metropolitan'},
+  KGRR:{lat:42.8808,lon:-85.5228, name:'Gerald R. Ford Intl'},
+  KPTK:{lat:42.6655,lon:-83.4197, name:'Oakland County Intl'},
+  // Minnesota
+  KMSP:{lat:44.8848,lon:-93.2223, name:'Minneapolis-St. Paul Intl'},
+  KSTP:{lat:44.9349,lon:-93.0598, name:'St. Paul Downtown'},
+  // Missouri
+  KSTL:{lat:38.7487,lon:-90.3700, name:'St. Louis Lambert Intl'},
+  KMCI:{lat:39.2976,lon:-94.7139, name:'Kansas City Intl'},
+  // Ohio
+  KCMH:{lat:39.9980,lon:-82.8919, name:'John Glenn Columbus Intl'},
+  KCLE:{lat:41.4117,lon:-81.8498, name:'Cleveland Hopkins Intl'},
+  KLUK:{lat:39.1033,lon:-84.4186, name:'Cincinnati Municipal Lunken'},
+  KCVG:{lat:39.0488,lon:-84.6677, name:'Cincinnati Northern Kentucky Intl'},
+  KDAY:{lat:39.9024,lon:-84.2194, name:'James M. Cox Dayton Intl'},
+  // Tennessee
+  KBNA:{lat:36.1245,lon:-86.6782, name:'Nashville Intl'},
+  KMEM:{lat:35.0424,lon:-89.9767, name:'Memphis Intl'},
+  KTYS:{lat:35.8118,lon:-83.9940, name:'McGhee Tyson Airport'},
+  // Louisiana
+  KMSY:{lat:29.9934,lon:-90.2580, name:'Louis Armstrong New Orleans Intl'},
+  KBTR:{lat:30.5332,lon:-91.1496, name:'Baton Rouge Metro'},
+  // Maryland
+  KBWI:{lat:39.1754,lon:-76.6683, name:'Baltimore Washington Intl'},
+  // Hawaii
+  PHNL:{lat:21.3187,lon:-157.9224,name:'Honolulu Intl'},
+  PHOG:{lat:20.8986,lon:-156.4305,name:'Maui Kahului'},
+  PHKO:{lat:19.7388,lon:-156.0456,name:'Ellison Onizuka Kona Intl'},
+  PHLI:{lat:21.9760,lon:-159.3392,name:'Lihue Airport Kauai'},
+  // Alaska
+  PANC:{lat:61.1744,lon:-149.9961,name:'Ted Stevens Anchorage Intl'},
+  PAFA:{lat:64.8151,lon:-147.8561,name:'Fairbanks Intl'},
+  // New Mexico
+  KABQ:{lat:35.0402,lon:-106.6090,name:'Albuquerque Intl Sunport'},
+  KSAF:{lat:35.6171,lon:-106.0887,name:'Santa Fe Municipal'},
+  KROW:{lat:33.3016,lon:-104.5306,name:'Roswell Intl Air Center'},
+  // Montana
+  KBZN:{lat:45.7775,lon:-111.1529,name:'Bozeman Yellowstone Intl'},
+  KGTF:{lat:47.4820,lon:-111.3706,name:'Great Falls Intl'},
+  KBIL:{lat:45.8077,lon:-108.5429,name:'Billings Logan Intl'},
+  KHLN:{lat:46.6068,lon:-111.9830,name:'Helena Regional'},
+  KMSO:{lat:46.9163,lon:-114.0906,name:'Missoula Montana'},
+  // Idaho
+  KBOI:{lat:43.5644,lon:-116.2228,name:'Boise Airport'},
+  KTWF:{lat:42.4818,lon:-114.4877,name:'Magic Valley Regional'},
+  // Wyoming
+  KJAC:{lat:43.6073,lon:-110.7377,name:'Jackson Hole Airport'},
+  KCPR:{lat:42.9080,lon:-106.4644,name:'Casper Natrona County Intl'},
+  // South Carolina
+  KCHS:{lat:32.8987,lon:-80.0405, name:'Charleston Intl'},
+  KMYR:{lat:33.6797,lon:-78.9283, name:'Myrtle Beach Intl'},
+  // Alabama
+  KBHM:{lat:33.5629,lon:-86.7535, name:'Birmingham-Shuttlesworth Intl'},
+  KHSV:{lat:34.6372,lon:-86.7751, name:'Huntsville Intl'},
+  KMOB:{lat:30.6912,lon:-88.2428, name:'Mobile Regional'},
+  // Indiana
+  KIND:{lat:39.7173,lon:-86.2944, name:'Indianapolis Intl'},
+  KFWA:{lat:40.9785,lon:-85.1952, name:'Fort Wayne Intl'},
+  // Wisconsin
+  KMKE:{lat:42.9472,lon:-87.8966, name:'Milwaukee Mitchell Intl'},
+  KMSN:{lat:43.1399,lon:-89.3375, name:'Dane County Regional'},
+  KATW:{lat:44.2581,lon:-88.5191, name:'Appleton Intl'},
+  // Nebraska
+  KOMA:{lat:41.3032,lon:-95.8941, name:'Eppley Airfield'},
+  KLNK:{lat:40.8510,lon:-96.7592, name:'Lincoln Airport'},
+  // Iowa
+  KDSM:{lat:41.5340,lon:-93.6631, name:'Des Moines Intl'},
+  KCID:{lat:41.8847,lon:-91.7108, name:'Eastern Iowa Airport'},
+  // Oklahoma
+  KOKC:{lat:35.3931,lon:-97.6007, name:'Will Rogers World'},
+  KTUL:{lat:36.1984,lon:-95.8881, name:'Tulsa Intl'},
+  // Arkansas
+  KLIT:{lat:34.7294,lon:-92.2243, name:'Clinton National'},
+  // Kentucky
+  KSDF:{lat:38.1744,lon:-85.7360, name:'Louisville Muhammad Ali Intl'},
+  KLEX:{lat:38.0366,lon:-84.6060, name:'Blue Grass Airport'},
+  // West Virginia
+  KCRW:{lat:38.3731,lon:-81.5932, name:'Yeager Airport'},
+  // Connecticut
+  KBDL:{lat:41.9389,lon:-72.6832, name:'Bradley Intl'},
+  // Rhode Island
+  KPVD:{lat:41.7241,lon:-71.4283, name:'T.F. Green Intl'},
+  // Maine
+  KPWM:{lat:43.6462,lon:-70.3093, name:'Portland Intl Jetport'},
+  KBGR:{lat:44.8074,lon:-68.8282, name:'Bangor Intl'},
+  // New Hampshire
+  KMHT:{lat:42.9326,lon:-71.4357, name:'Manchester-Boston Regional'},
+  // Vermont
+  KBTV:{lat:44.4720,lon:-73.1533, name:'Burlington Intl'},
+  // Delaware
+  KILG:{lat:39.6788,lon:-75.6065, name:'Wilmington Airport'},
+  // North Dakota
+  KBIS:{lat:46.7727,lon:-100.7463,name:'Bismarck Airport'},
+  KFAR:{lat:46.9207,lon:-96.8158, name:'Hector Intl Fargo'},
+  // South Dakota
+  KRAP:{lat:44.0453,lon:-103.0574,name:'Rapid City Regional'},
+  KFSD:{lat:43.5820,lon:-96.7419, name:'Sioux Falls Regional'},
+  // Kansas
+  KICT:{lat:37.6499,lon:-97.4331, name:'Wichita Dwight D. Eisenhower'},
+  KTOP:{lat:39.0669,lon:-95.6630, name:'Philip Billard Municipal'},
+  // Mississippi
+  KJAN:{lat:32.3112,lon:-90.0759, name:'Jackson-Medgar Evers Intl'},
+  KGPT:{lat:30.4073,lon:-89.0701, name:'Gulf Shores Gulfport-Biloxi'},
+};
+
+// ── TIMEZONE ──────────────────────────────────────────────────────────────
+// Explicit overrides for airports that don't follow their longitude's timezone
+const TZ_EXPLICIT = {
+  // Arizona: Mountain time but NO daylight saving
+  KSEZ:'America/Phoenix',KPHX:'America/Phoenix',KSDL:'America/Phoenix',
+  KFFZ:'America/Phoenix',KGYR:'America/Phoenix',KDVT:'America/Phoenix',
+  KTUS:'America/Phoenix',KPRC:'America/Phoenix',KFLG:'America/Phoenix',
+  KIWA:'America/Phoenix',KCHD:'America/Phoenix',KCGZ:'America/Phoenix',
+  KCDC:'America/Phoenix',KSGU:'America/Phoenix',KROW:'America/Phoenix',
+  KABQ:'America/Denver', KSAF:'America/Denver',  // New Mexico follows MT w/ DST
+  // Hawaii
+  PHNL:'Pacific/Honolulu',PHOG:'Pacific/Honolulu',PHKO:'Pacific/Honolulu',PHLI:'Pacific/Honolulu',
+  // Alaska
+  PANC:'America/Anchorage',PAFA:'America/Anchorage',
+};
+function getTimezone(icao, lon) {
+  if (TZ_EXPLICIT[icao]) return TZ_EXPLICIT[icao];
+  // Rough US continental longitude bands
+  if (lon < -120) return 'America/Los_Angeles';
+  if (lon < -104) return 'America/Denver';
+  if (lon < -87)  return 'America/Chicago';
+  return 'America/New_York';
+}
+function getTzAbbr(tz) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {timeZone:tz, timeZoneName:'short'})
+      .formatToParts(new Date()).find(p => p.type==='timeZoneName')?.value || '';
+  } catch(e) { return ''; }
+}
+
+// ── UTILS ─────────────────────────────────────────────────────────────────
+function distNm(lat1, lon1, lat2, lon2) {
+  const R = 3440.065, dLat = (lat2-lat1)*Math.PI/180, dLon = (lon2-lon1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function getStatus(f) {
+  if (f.on_ground) return 'GROUND';
+  const ft = f.alt_ft;
+  const vs = f.baro_rate || 0;
+  const near = f.dist < 8;
+  const local = f.dist < 20;
+  if (ft != null && ft < 2500 && near) {
+    if (vs >  150) return 'DEPARTING';
+    if (vs < -150) return 'ARRIVING';
+    return 'PATTERN';
+  }
+  if (local) {
+    if (vs >  150) return 'DEPARTING';
+    if (vs < -150) return 'ARRIVING';
+  }
+  return 'OVERFLY';
+}
+
+const STATUS_CLS = { ARRIVING:'ARR', DEPARTING:'DEP', PATTERN:'PAT', OVERFLY:'OVR', GROUND:'GND' };
+const STATUS_ORD = { ARRIVING:0, DEPARTING:1, PATTERN:2, OVERFLY:3, GROUND:4 };
+
+// ── CLOCK ─────────────────────────────────────────────────────────────────
+function tickClock() {
+  const n = new Date();
+  const z = s => String(s).padStart(2,'0');
+  // Zulu — HH:MM:SS Z
+  document.getElementById('clock').innerHTML =
+    `${z(n.getUTCHours())}:${z(n.getUTCMinutes())}:${z(n.getUTCSeconds())}<span class="clock-z">Z</span>`;
+  // Local airport time — HH:MM TZ (24h, same font/size as zulu)
+  if (CFG.tz) {
+    const t = n.toLocaleTimeString('en-US', {timeZone:CFG.tz, hour:'2-digit', minute:'2-digit', hour12:false});
+    const tzEl = document.getElementById('clock-local-tz');
+    document.getElementById('clock-local').innerHTML =
+      `${t}<span class="clock-z">${tzEl ? ' '+tzEl.textContent : ''}</span>`;
+  }
+}
+setInterval(tickClock, 1000); tickClock();
+
+// ── ICAO INPUT HANDLER ────────────────────────────────────────────────────
+function goToIcao() {
+  const val = document.getElementById('icao-inp').value.trim().toUpperCase();
+  if (val.length >= 3) {
+    const qs = new URLSearchParams(location.search);
+    qs.set('icao', val);
+    // Clear any previously pinned lat/lon so the new airport gets looked up fresh
+    qs.delete('lat'); qs.delete('lon'); qs.delete('name');
+    location.search = qs.toString();
+  }
+}
+// Wire up after DOM is ready (called at bottom of init)
+
+// ── AIRPORT LOOKUP ────────────────────────────────────────────────────────
+async function lookupAirport(icao) {
+  // 1. Built-in DB
+  if (AIRPORTS[icao]) return AIRPORTS[icao];
+  // 2. aviationweather.gov API
+  try {
+    const r = await fetch(`https://aviationweather.gov/api/data/airport?ids=${icao}&format=json`, {signal: AbortSignal.timeout(8000)});
+    if (r.ok) {
+      const d = await r.json();
+      if (Array.isArray(d) && d.length && d[0].lat != null) {
+        return { lat: parseFloat(d[0].lat), lon: parseFloat(d[0].lon), name: d[0].name || icao };
+      }
+    }
+  } catch(e) { console.warn('Airport API fallback failed:', e.message); }
+  // 3. Failed
+  return null;
+}
+
+// ── METAR ─────────────────────────────────────────────────────────────────
+function parseMETAR(raw) {
+  if (!raw) return {};
+  let wind='—', vis='—', sky='—', temp='—', altim='—', fr='VFR';
+  const wm = raw.match(/(\d{3}|VRB)(\d{2,3})(G\d+)?KT/);
+  if (wm) wind = `${wm[1]}° ${parseInt(wm[2])}${wm[3]||''}kt`;
+  const vm = raw.match(/(\d+(?:\s+\d+\/\d+)?|\d+\/\d+)SM/);
+  if (vm) vis = vm[0];
+  for (const t of ['OVC','BKN','SCT','FEW','SKC','CLR','CAVOK']) {
+    const m = raw.match(new RegExp(`${t}(\\d{3})?`));
+    if (m) { sky = t + (m[1] ? ` ${parseInt(m[1])*100}'` : ''); break; }
+  }
+  const tm = raw.match(/\s(M?\d{2})\/(M?\d{2})\s/);
+  if (tm) {
+    const t = parseInt(tm[1].replace('M','-')), df = Math.round(t*9/5+32);
+    temp = `${t}°C / ${df}°F`;
+  }
+  const am = raw.match(/A(\d{4})/);
+  if (am) altim = `${(parseInt(am[1])/100).toFixed(2)}"`;
+  let ceil=9999, visN=10;
+  const cm = raw.match(/(BKN|OVC)(\d{3})/); if (cm) ceil = parseInt(cm[2])*100;
+  const vm2 = raw.match(/(\d+)SM/); if (vm2) visN = parseInt(vm2[1]);
+  if      (visN>=5 && ceil>=3000) fr='VFR';
+  else if (visN>=3 && ceil>=1000) fr='MVFR';
+  else if (visN>=1 && ceil>=500)  fr='IFR';
+  else                             fr='LIFR';
+  return { wind, vis, sky, temp, altim, fr };
+}
+
+async function fetchMETAR(icao) {
+  const updateDOM = p => {
+    document.getElementById('m-wind').textContent  = p.wind  || '—';
+    document.getElementById('m-vis').textContent   = p.vis   || '—';
+    document.getElementById('m-sky').textContent   = p.sky   || '—';
+    document.getElementById('m-temp').textContent  = p.temp  || '—';
+    document.getElementById('m-altim').textContent = p.altim || '—';
+    const frEl = document.getElementById('m-fr');
+    frEl.textContent = p.fr || '—';
+    frEl.style.color = {VFR:'var(--green)',MVFR:'#4090e0',IFR:'var(--amber)',LIFR:'#e04040'}[p.fr]||'var(--txt)';
+  };
+  // Primary: VATSIM METAR server — returns plain text, CORS-open from file://
+  try {
+    const r = await fetch(`https://metar.vatsim.net/metar.php?id=${icao}`, {signal:AbortSignal.timeout(8000)});
+    if (r.ok) {
+      const txt = await r.text();
+      const line = txt.trim().split(/\r?\n/).find(l => l.startsWith(icao)) || txt.trim();
+      if (line) { updateDOM(parseMETAR(line)); return; }
+    }
+  } catch(e) { console.warn('VATSIM METAR:', e.message); }
+  // Fallback: aviationweather.gov JSON — works from http server, CORS-blocked from file://
+  try {
+    const r = await fetch(`https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`, {signal:AbortSignal.timeout(8000)});
+    if (r.ok) {
+      const d = await r.json();
+      if (Array.isArray(d) && d.length) updateDOM(parseMETAR(d[0].rawOb || ''));
+    }
+  } catch(e) { console.warn('METAR fallback:', e.message); }
+}
+
+// ── AIRCRAFT FETCH (airplanes.live primary, adsb.fi fallback) ────────────
+async function fetchFlights() {
+  const lat = CFG.lat.toFixed(4), lon = CFG.lon.toFixed(4), nm = CFG.radiusNm;
+  const SOURCES = [
+    `https://api.airplanes.live/v2/point/${lat}/${lon}/${nm}`,
+    `https://api.adsb.fi/v1/point/${lat}/${lon}/${nm}`,
+  ];
+  let d = null, lastErr = null;
+  for (const url of SOURCES) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      d = await r.json();
+      break;
+    } catch(e) { lastErr = e; console.warn('ADS-B source failed:', url, e.message); }
+  }
+  if (!d) throw new Error(lastErr?.message || 'All ADS-B sources failed');
+  const ac = d.ac || d.aircraft || [];
+
+  return ac
+    .filter(a => a.lat != null && a.lon != null)
+    .map(a => {
+      // alt_baro can be a number (feet) or the string "ground"
+      const onGround = a.on_ground === true || a.on_ground === 1 || a.alt_baro === 'ground';
+      const altFt    = (typeof a.alt_baro === 'number') ? Math.round(a.alt_baro) : null;
+      return {
+        hex:       a.hex || a.icao24 || '?',
+        callsign:  (a.flight || a.callsign || '').trim() || null,
+        reg:       a.r || a.registration || null,
+        typeCode:  a.t || a.type_code || null,
+        desc:      a.desc || a.description || null,
+        orig:      null,   // filled asynchronously by enrichRoute()
+        dest:      null,
+        lat:       a.lat,
+        lon:       a.lon,
+        alt_ft:    altFt,
+        gs:        a.gs != null ? Math.round(a.gs) : null,
+        track:     a.track != null ? a.track : null,
+        baro_rate: a.baro_rate != null ? a.baro_rate : null,
+        on_ground: onGround,
+        dist:      distNm(CFG.lat, CFG.lon, a.lat, a.lon),
+      };
+    })
+    .map(f => { f.status = getStatus(f); return f; })
+    .sort((a,b) => {
+      const os = (STATUS_ORD[a.status]??5) - (STATUS_ORD[b.status]??5);
+      return os !== 0 ? os : a.dist - b.dist;
+    });
+}
+
+// ── ROUTE ENRICHMENT (adsbdb.com, free, no key) ──────────────────────────
+// Cache: callsign → {orig, dest} or null (null = lookup attempted, no data)
+const routeCache = new Map();
+
+async function fetchRoute(callsign) {
+  if (routeCache.has(callsign)) return routeCache.get(callsign);
+  try {
+    const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`,
+      { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) { routeCache.set(callsign, null); return null; }
+    const d = await r.json();
+    const fr = d?.response?.flightroute;
+    if (!fr) { routeCache.set(callsign, null); return null; }
+    const route = {
+      orig: fr.origin?.iata_code || fr.origin?.icao_code || null,
+      dest: fr.destination?.iata_code || fr.destination?.icao_code || null,
+    };
+    routeCache.set(callsign, route);
+    return route;
+  } catch(e) {
+    routeCache.set(callsign, null);
+    return null;
+  }
+}
+
+// After initial render, look up routes for all flights with callsigns
+// and patch the DOM cells in place — no full re-render
+function enrichRoutes(flights) {
+  flights.forEach(async f => {
+    if (!f.callsign) return;
+    const route = await fetchRoute(f.callsign);
+    if (!route?.orig && !route?.dest) return;
+    // Find the row and patch just the route cell (3rd td, index 2)
+    const row = document.querySelector(`tr[data-hex="${f.hex}"]`);
+    if (!row) return;
+    const cell = row.querySelectorAll('td')[2];
+    if (!cell) return;
+    cell.innerHTML = `<div class="td-route-orig">${route.orig || '?'}</div>
+                      <div class="td-route-arr">▸ ${route.dest || '?'}</div>`;
+  });
+}
+
+// ── TABLE RENDER ──────────────────────────────────────────────────────────
+function renderTable(flights) {
+  const tbody   = document.getElementById('tbody');
+  const empty   = document.getElementById('empty');
+  const tblWrap = document.getElementById('tbl-wrap');
+  document.getElementById('badge').textContent   = `${flights.length} AIRCRAFT`;
+  document.getElementById('f-count').textContent = flights.length;
+
+  if (!flights.length) {
+    tbody.innerHTML = '';
+    empty.classList.add('on');
+    tblWrap.style.display = 'none';
+    return;
+  }
+  empty.classList.remove('on');
+  tblWrap.style.display = '';
+
+  tbody.innerHTML = flights.map(f => {
+    const cs      = f.callsign || f.reg || f.hex.toUpperCase();
+    const reg     = f.reg || f.hex.toUpperCase();
+    const showReg = (reg !== cs) ? reg : '';
+    const typeTxt = f.typeCode || '—';
+    const descTxt = f.desc ? (f.desc.length > 26 ? f.desc.slice(0,26)+'…' : f.desc) : '';
+    const orig    = f.orig || null;
+    const dest    = f.dest || null;
+    const altPct  = f.alt_ft ? Math.min(100, (f.alt_ft/45000)*100) : 0;
+    const cls     = STATUS_CLS[f.status] || 'OVR';
+    const hdg     = f.track || 0;
+
+    // Route cell: show orig→dest if any, else show —
+    const routeCell = (orig || dest)
+      ? `<div class="td-route-orig">${orig||'?'}</div>
+         <div class="td-route-arr">▸ ${dest||'?'}</div>`
+      : `<div class="td-route-orig" style="color:var(--txt3)">—</div>`;
+
+    return `<tr class="frow${f.on_ground?' gnd':''}" data-hex="${f.hex}">
+      <td>
+        <div class="td-id">${cs}</div>
+        <div class="td-sub">${showReg}</div>
+      </td>
+      <td>
+        <div class="td-type">${typeTxt}</div>
+        <div class="td-mfr">${descTxt}</div>
+      </td>
+      <td>${routeCell}</td>
+      <td class="r">
+        <div class="alt-wrap">
+          <span class="td-num">${f.alt_ft!=null ? f.alt_ft.toLocaleString() : f.on_ground ? 'GND' : '—'}</span>
+          ${f.alt_ft!=null ? '<span class="td-unit">ft</span>' : ''}
+          <div class="alt-bar"><div class="alt-fill" style="width:${altPct}%"></div></div>
+        </div>
+      </td>
+      <td class="r">
+        <span class="td-num">${f.gs!=null ? f.gs : '—'}</span>
+        ${f.gs!=null ? '<span class="td-unit">kt</span>' : ''}
+      </td>
+      <td class="c">
+        <span class="hdg-sym" style="display:inline-block;transform:rotate(${hdg}deg)" title="${Math.round(hdg)}°">↑</span>
+      </td>
+      <td class="r">
+        <span class="td-num">${f.dist.toFixed(1)}</span>
+        <span class="td-unit">nm</span>
+      </td>
+      <td class="c"><span class="badge ${cls}">${f.status}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── MAP ───────────────────────────────────────────────────────────────────
+let map = null, markers = new Map();
+
+function initMap() {
+  map = L.map('map', { center:[CFG.lat, CFG.lon], zoom:11, attributionControl:true });
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution:'&copy; OpenStreetMap &copy; CARTO', subdomains:'abcd', maxZoom:19,
+  }).addTo(map);
+  // Rings
+  const rs = { color:'#00c8f0', weight:.6, opacity:.15, fill:false, dashArray:'4 10' };
+  [5,10,20].forEach(nm => L.circle([CFG.lat, CFG.lon], {...rs, radius:nm*1852}).addTo(map));
+  // Airport marker
+  const airIco = L.divIcon({
+    html:`<svg width="22" height="22" viewBox="0 0 24 24"><polygon points="12,2 14.5,9 22,9 16,14 18.5,21 12,17 5.5,21 8,14 2,9 9.5,9" fill="none" stroke="#00c8f0" stroke-width="1.4" opacity=".88"/></svg>`,
+    className:'', iconSize:[22,22], iconAnchor:[11,11],
+  });
+  L.marker([CFG.lat, CFG.lon], {icon:airIco}).addTo(map)
+    .bindPopup(`<b style="color:#00c8f0">${CFG.icao}</b><br>${CFG.name}`);
+}
+
+function planeIcon(hdg, status) {
+  const clr = {ARRIVING:'#00e87a',DEPARTING:'#f0a000',PATTERN:'#9060f0',OVERFLY:'#4a90d8',GROUND:'#4a7090'}[status]||'#00c8f0';
+  return L.divIcon({
+    html:`<div style="transform:rotate(${hdg||0}deg);width:20px;height:20px;display:flex;align-items:center;justify-content:center;">
+      <svg width="20" height="20" viewBox="0 0 24 24">
+        <path d="M12 2 L9.5 16 L12 14 L14.5 16 Z" fill="${clr}" opacity=".92"/>
+        <path d="M5.5 11 L18.5 11 L16.5 13 L7.5 13 Z" fill="${clr}" opacity=".7"/>
+        <path d="M9 17 L15 17 L14 19.5 L10 19.5 Z" fill="${clr}" opacity=".5"/>
+      </svg></div>`,
+    className:'', iconSize:[20,20], iconAnchor:[10,10],
+  });
+}
+
+function updateMarkers(flights) {
+  if (!map) return;
+  const seen = new Set(flights.map(f=>f.hex));
+  for (const [hex, m] of markers) { if (!seen.has(hex)) { map.removeLayer(m); markers.delete(hex); } }
+  for (const f of flights) {
+    if (!f.lat || !f.lon) continue;
+    const cs  = f.callsign || f.reg || f.hex.toUpperCase();
+    const ico = planeIcon(f.track, f.status);
+    const pop = `<b style="color:#00c8f0">${cs}</b>${f.reg&&f.reg!==cs?'<br>'+f.reg:''}<br>`
+      + `${f.alt_ft!=null ? f.alt_ft.toLocaleString()+' ft' : f.on_ground ? 'On Ground' : '—'}`
+      + ` · ${f.gs!=null ? f.gs+' kt' : '—'}<br>${f.status} · ${f.dist.toFixed(1)} nm`
+      + (f.typeCode ? `<br><span style="color:#506878">${f.typeCode}${f.desc?' · '+f.desc:''}</span>` : '');
+    if (markers.has(f.hex)) {
+      const m = markers.get(f.hex);
+      m.setLatLng([f.lat,f.lon]); m.setIcon(ico); m.getPopup()?.setContent(pop);
+    } else {
+      markers.set(f.hex, L.marker([f.lat,f.lon],{icon:ico}).addTo(map).bindPopup(pop));
+    }
+  }
+}
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────
+async function refresh() {
+  const dot = document.getElementById('dot');
+  dot.style.background = 'var(--amber)'; dot.style.boxShadow = 'var(--amber-glo)';
+  try {
+    const flights = await fetchFlights();
+    fetchMETAR(CFG.icao); // fire and forget
+    renderTable(flights);
+    enrichRoutes(flights); // async background — patches route cells as data arrives
+    updateMarkers(flights);
+    const n = new Date();
+    const z = s => String(s).padStart(2,'0');
+    document.getElementById('f-upd').textContent = `${z(n.getUTCHours())}:${z(n.getUTCMinutes())}Z`;
+    document.getElementById('f-err').textContent = '';
+    dot.style.background = 'var(--green)'; dot.style.boxShadow = 'var(--green-glo)';
+  } catch(e) {
+    console.error(e);
+    document.getElementById('f-err').textContent = `⚠ ${e.message}`;
+    dot.style.background = 'rgba(240,80,80,.75)'; dot.style.boxShadow = '';
+  }
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+async function init() {
+  document.getElementById('loading-icao').textContent = CFG.icao;
+  document.getElementById('h-icao').textContent = CFG.icao;
+  document.getElementById('f-radius').textContent = CFG.radiusNm;
+  document.title = `${CFG.icao} · Airport Traffic`;
+
+  // If lat/lon not provided via URL, look up the airport
+  if (CFG.lat == null || CFG.lon == null) {
+    setLoadingMsg('Looking up airport…');
+    const ap = await lookupAirport(CFG.icao);
+    if (!ap) {
+      showLoadingError(`Airport "${CFG.icao}" not found. Try adding ?lat=XX.XXX&lon=-XXX.XXX&name=My+Airport to the URL.`);
+      return;
+    }
+    CFG.lat  = ap.lat;
+    CFG.lon  = ap.lon;
+    CFG.name = CFG.name || ap.name;
+  } else {
+    CFG.name = CFG.name || CFG.icao;
+  }
+
+  // Update all name references
+  document.getElementById('h-name').textContent  = CFG.name;
+  document.getElementById('map-lbl').textContent = `${CFG.icao} · ${CFG.name}`;
+  document.title = `${CFG.icao} · ${CFG.name}`;
+
+  // Timezone: derive from ICAO + longitude, set abbreviation label
+  CFG.tz = getTimezone(CFG.icao, CFG.lon);
+  const tzAbbr = getTzAbbr(CFG.tz);
+  document.getElementById('clock-local-tz').textContent = tzAbbr;
+  tickClock(); // re-render now that tz is set
+
+  // Wire ICAO input
+  const inp = document.getElementById('icao-inp');
+  inp.value = CFG.icao;
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') goToIcao(); });
+  document.getElementById('icao-btn').addEventListener('click', goToIcao);
+
+  setLoadingMsg('Initializing map…');
+  initMap();
+
+  setLoadingMsg('Fetching aircraft…');
+  await refresh();
+
+  document.getElementById('loading').classList.add('gone');
+  setInterval(refresh, CFG.refresh);
+}
+
+function setLoadingMsg(msg) {
+  document.getElementById('loading-msg').textContent = msg;
+}
+function showLoadingError(msg) {
+  const ld = document.getElementById('loading');
+  const bar = ld.querySelector('.ld-track');
+  bar.style.display = 'none';
+  const el = document.getElementById('loading-err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  document.getElementById('loading-msg').textContent = 'Could not load airport data';
+}
+
+init();
+</script>
+</body>
+</html>
