@@ -167,6 +167,8 @@
     .OVR::before { background:#4a90d8; }
     .GND { color:var(--slate);  background:var(--slate-g);  border-color:rgba(74,112,144,.2); }
     .GND::before { background:var(--slate); }
+    .TXI { color:var(--cyan);   background:rgba(0,200,240,.1);  border-color:rgba(0,200,240,.22); }
+    .TXI::before { background:var(--cyan);  box-shadow:var(--cyan-glo); }
 
     .empty { display:none; flex-direction:column; align-items:center; justify-content:center; flex:1; gap:2.5vh; padding:4vh 2vw; }
     .empty.on { display:flex; }
@@ -636,80 +638,134 @@ function bearingTo(lat1, lon1, lat2, lon2) {
 function hdgDiff(a, b) { return Math.abs(((a-b)+540)%360-180); }
 
 // ── STATUS DETERMINATION ──────────────────────────────────────────────────
-// Always conservative — prefers OVERFLY when uncertain.
+// Per-aircraft history + hysteresis. A single ADS-B snapshot can't reliably
+// classify a flight phase — banking turns, flare-out, baro lag all produce
+// noisy values. Trends over the last few minutes are stable.
 //
-// Works in AGL above AIRPORT elevation, not MSL. This is essential:
-// KSEZ is at 4827 ft MSL. A 737 at FL080 is only 3173 ft AGL here —
-// exactly on a 10nm approach slope. Without this correction it looks
-// like a high cruiser.
+// Two state stores (always maintained, even when audio is disarmed):
+//   flightHistory: hex → [last 12 samples, ~6 min at 30s refresh]
+//   lastStatus:    hex → previous cycle's status (for hysteresis + chimes)
 //
-// ARRIVING  — heading ±40° toward airport, descending >200 fpm, AND
-//             AGL fits the approach corridor (200–530 ft per nm away):
-//             200 ft/nm ≈ 1.9° floor, 530 ft/nm ≈ 5° ceiling.
-//             Route cache blocks it if destination is known elsewhere.
-// PATTERN   — <5 nm, low AGL, not committed climb/dive, slow speed.
-//             Checked first to avoid chime-spamming touch-and-goes.
-//             On-final sub-case (toward + descending) returns ARRIVING.
-// DEPARTING — <15 nm, low AGL (<5000 ft), climbing >400 fpm,
-//             heading >100° away, airborne speed >60 kt.
-// OVERFLY   — everything else.
+// State model:
+//   GROUND    — on ground, stationary
+//   TAXIING   — on ground, moving (rollout, taxi)
+//   DEPARTING — was on ground recently OR (climbing + heading away + low AGL)
+//   ARRIVING  — closing distance + descending + on glidepath corridor
+//   PATTERN   — circling close, low, slow (touch-and-goes)
+//   OVERFLY   — passing through; no commitment to land or recently-departed signature
+
+const flightHistory = new Map();
+const lastStatus    = new Map();
+const HIST_MAX_SAMPLES   = 12;       // ~6 min at 30s refresh
+const RECENT_GROUND_MS   = 180000;   // 3 min — counts as "just departed"
 
 function getStatus(f) {
-  if (f.on_ground) return 'GROUND';
+  // 1. Record this sample (always, even before classification)
+  let hist = flightHistory.get(f.hex);
+  if (!hist) { hist = []; flightHistory.set(f.hex, hist); }
+  hist.push({
+    ts: Date.now(),
+    alt: f.alt_ft, vs: f.baro_rate || 0, gs: f.gs || 0,
+    track: f.track, dist: f.dist, on_ground: f.on_ground,
+  });
+  while (hist.length > HIST_MAX_SAMPLES) hist.shift();
 
+  // 2. Ground states are definitive — trust on_ground from ADS-B
+  if (f.on_ground) {
+    return (f.gs || 0) > 5 ? 'TAXIING' : 'GROUND';
+  }
+
+  // 3. Airborne — derived values
   const elev = CFG.elev || 0;
-  const agl  = f.alt_ft != null ? f.alt_ft - elev : null; // ft above airport elevation
-  const vs   = f.baro_rate || 0;                           // fpm
-  const spd  = f.gs || 0;                                  // kt
+  const agl  = f.alt_ft != null ? f.alt_ft - elev : null;
+  const vs   = f.baro_rate || 0;
+  const spd  = f.gs || 0;
+  const prev = lastStatus.get(f.hex);
 
-  const brg    = bearingTo(f.lat, f.lon, CFG.lat, CFG.lon);
-  const diff   = hdgDiff(f.track || 0, brg);
-  const toward = diff < 40;   // nose within 40° of direct bearing to us
-  const away   = diff > 100;  // clearly not heading toward us
-
-  const cached        = f.callsign ? routeCache.get(f.callsign) : null;
-  const dest          = cached?.dest || null;
-  const iataUs        = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
-  const destHere      = dest && (dest === CFG.icao || dest === iataUs);
-  const destElsewhere = dest && !destHere;
-
-  // ── PATTERN (<5 nm) ───────────────────────────────────────────────────────
-  if (f.dist < 5 && agl != null && agl >= 0 && agl < 2500
-      && Math.abs(vs) < 600 && spd < 200 && !destElsewhere) {
-    if (toward && vs < -150) return 'ARRIVING'; // on final
-    return 'PATTERN';                            // flying the box
-  }
-
-  // ── ARRIVING (5–20 nm) ───────────────────────────────────────────────────
-  if (!destElsewhere && f.dist >= 5 && f.dist < 20) {
-    // Glidepath corridor: 200 ft/nm floor (1.9°) to 530 ft/nm ceiling (5°)
-    const floor   = f.dist * 200;
-    const ceiling = f.dist * 530;
-    const onSlope = agl != null && agl >= floor && agl <= ceiling;
-    if (toward && vs < -200 && onSlope) return 'ARRIVING';
-  }
-
-  // ── ARRIVING (20–30 nm, tight criteria) ──────────────────────────────────
-  if (f.dist >= 20 && f.dist < 30) {
-    if (destHere && vs < -150) return 'ARRIVING'; // route confirms us
-    if (!destElsewhere) {
-      const ceiling = f.dist * 530;
-      const onSlope = agl != null && agl > 0 && agl <= ceiling;
-      if (diff < 25 && vs < -300 && onSlope) return 'ARRIVING'; // very tight heading
+  // 4. History-based trends (require ≥ 2 samples spaced > 18s apart)
+  let altTrend = null, distTrend = null;
+  if (hist.length >= 2) {
+    const o = hist[0], n = hist[hist.length - 1];
+    const dtMin = (n.ts - o.ts) / 60000;
+    if (dtMin > 0.3) {
+      if (o.alt != null && n.alt != null) altTrend = (n.alt - o.alt) / dtMin;
+      distTrend = (n.dist - o.dist) / dtMin;
     }
   }
 
-  // ── DEPARTING (<15 nm) ───────────────────────────────────────────────────
-  if (f.dist < 15 && agl != null && agl >= 0 && agl < 5000
-      && vs > 400 && away && spd > 60) {
+  // 5. Was recently on the ground? Strong "just departed" signal
+  const NOW = Date.now();
+  const recentlyGrounded = hist.some(s => s.on_ground && (NOW - s.ts) < RECENT_GROUND_MS);
+
+  // 6. Heading geometry
+  const brg    = bearingTo(f.lat, f.lon, CFG.lat, CFG.lon);
+  const diff   = hdgDiff(f.track || 0, brg);
+  const toward = diff < 45;
+  const away   = diff > 105;
+
+  // 7. Route cache cross-check
+  const cached = f.callsign ? routeCache.get(f.callsign) : null;
+  const dest   = cached?.dest || null;
+  const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
+  const destHere      = dest && (dest === CFG.icao || dest === iataUs);
+  const destElsewhere = dest && !destHere;
+
+  // 8. Robust descending / closing flags
+  // Use trend if we have enough history; fall back to instantaneous values otherwise.
+  const descending = (altTrend != null) ? altTrend < -100 : vs < -150;
+  const climbing   = (altTrend != null) ? altTrend >  100 : vs >  200;
+  const closing    = (distTrend != null) ? distTrend < -0.3 : (toward && spd > 50);
+  const departing  = (distTrend != null) ? distTrend >  0.3 : away;
+
+  // ─── DEPARTING ───────────────────────────────────────────────────────────
+  // Just lifted off — strongest signal we have
+  if (recentlyGrounded && agl != null && agl < 6000 && f.dist < 15) {
+    return 'DEPARTING';
+  }
+  // Hysteresis: previously DEPARTING and still climbing/moving away — sticky
+  if (prev === 'DEPARTING' && agl != null && agl < 15000 && f.dist < 30) {
+    if ((climbing || vs > 0) && (departing || away)) return 'DEPARTING';
+  }
+
+  // ─── ARRIVING ────────────────────────────────────────────────────────────
+  if (!destElsewhere && agl != null) {
+    // Glidepath ceiling: AGL ≤ dist × 530 ft (5° approach max).
+    // No floor — on short final AGL approaches 0.
+    const onCorridor = agl <= f.dist * 530 + 200 && agl >= -300;
+
+    if (f.dist < 4) {
+      // Very close: on final approach OR pattern OR just touched down
+      if (descending && (toward || closing || prev === 'ARRIVING')) return 'ARRIVING';
+      if (agl < 2500 && spd < 200 && Math.abs(vs) < 600) return 'PATTERN';
+    }
+    else if (f.dist < 12) {
+      // Strong arrival signal
+      if (closing && descending && onCorridor && toward) return 'ARRIVING';
+      // Hysteresis: once arriving, stay arriving while still descending toward us
+      if (prev === 'ARRIVING' && descending && onCorridor && !departing) return 'ARRIVING';
+    }
+    else if (f.dist < 25) {
+      // Tighter requirements at distance
+      if (closing && descending && onCorridor && diff < 35) return 'ARRIVING';
+      if (destHere && descending) return 'ARRIVING';
+      // Hysteresis: stay arriving if still closing and descending
+      if (prev === 'ARRIVING' && closing && descending) return 'ARRIVING';
+    }
+  }
+
+  // ─── DEPARTING (secondary geometry-based check) ─────────────────────────
+  // Climbing + heading away + low + close — likely just departed, even if
+  // we missed the on-ground sample
+  if (f.dist < 12 && agl != null && agl >= 0 && agl < 5000
+      && climbing && away && spd > 60) {
     return 'DEPARTING';
   }
 
   return 'OVERFLY';
 }
 
-const STATUS_CLS = { ARRIVING:'ARR', DEPARTING:'DEP', PATTERN:'PAT', OVERFLY:'OVR', GROUND:'GND' };
-const STATUS_ORD = { ARRIVING:0, DEPARTING:1, PATTERN:2, OVERFLY:3, GROUND:4 };
+const STATUS_CLS = { ARRIVING:'ARR', DEPARTING:'DEP', PATTERN:'PAT', OVERFLY:'OVR', GROUND:'GND', TAXIING:'TXI' };
+const STATUS_ORD = { ARRIVING:0,    DEPARTING:1,    PATTERN:2,    TAXIING:3,    GROUND:4,     OVERFLY:5 };
 
 // ── CLOCK ─────────────────────────────────────────────────────────────────
 function tickClock() {
@@ -1128,7 +1184,8 @@ function showLoadingError(msg) {
 // ── AUDIO ALERT SYSTEM ───────────────────────────────────────────────────
 let audioCtx  = null;
 let audioArmed = false;
-const prevStatus = new Map(); // hex → last known status
+// Note: lastStatus map is declared with the status logic above and is
+// always maintained — it serves both hysteresis and chime-trigger duty.
 
 function armAudio() {
   if (audioArmed) return;
@@ -1171,21 +1228,22 @@ function playPattern() {
 }
 
 function checkStatusTransitions(flights) {
-  if (!audioArmed) return;
+  // Always maintain lastStatus map (it's used for hysteresis in getStatus too)
   const seen = new Set();
   for (const f of flights) {
     seen.add(f.hex);
-    const prev = prevStatus.get(f.hex);
+    const prev = lastStatus.get(f.hex);
     const curr = f.status;
-    if (prev !== undefined && prev !== curr) {
+    // Fire chimes only when armed AND status actually changed
+    if (audioArmed && prev !== undefined && prev !== curr) {
       if (curr === 'ARRIVING') playArriving();
       else if (curr === 'PATTERN') playPattern();
     }
-    prevStatus.set(f.hex, curr);
+    lastStatus.set(f.hex, curr);
   }
-  // Remove aircraft no longer in range so re-entry triggers again
-  for (const hex of prevStatus.keys()) {
-    if (!seen.has(hex)) prevStatus.delete(hex);
+  // Cleanup vanished aircraft from BOTH maps so re-entry triggers fresh
+  for (const hex of lastStatus.keys()) {
+    if (!seen.has(hex)) { lastStatus.delete(hex); flightHistory.delete(hex); }
   }
 }
 
