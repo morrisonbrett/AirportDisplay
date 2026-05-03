@@ -291,6 +291,7 @@
   <div class="fi-sp"></div>
   <div class="fi-err" id="f-err"></div>
   <button class="audio-btn" id="audio-btn" title="Tap once to enable arrival chimes">🔔 Enable Chimes</button>
+  <button class="audio-btn" id="awake-btn" title="Tap to enable screen keep-awake">📺 Keep Awake</button>
   <div class="fi">Updated · <span id="f-upd">—</span></div>
   <div class="fi">Auto-refresh · <span>30s</span></div>
 </footer>
@@ -1158,6 +1159,16 @@ async function init() {
   // Wire audio arm button (requires user gesture — can't autoplay without it)
   document.getElementById('audio-btn').addEventListener('click', armAudio);
 
+  // Keep-awake button — off by default, user opts in
+  const awakeBtn = document.getElementById('awake-btn');
+  awakeBtn.addEventListener('click', () => {
+    startKeepAwake();
+    awakeBtn.textContent = '📺 Keep Awake On';
+    awakeBtn.classList.add('armed');
+    awakeBtn.disabled = true;
+    awakeBtn.style.cursor = 'default';
+  });
+
   setLoadingMsg('Initializing map…');
   initMap();
 
@@ -1284,7 +1295,6 @@ function startKeepAwake() {
   }
 }
 
-startKeepAwake();
 init();
 </script>
 </body>
