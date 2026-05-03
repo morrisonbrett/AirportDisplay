@@ -1054,6 +1054,9 @@ function renderRouteCell(route, currentIcao, currentIata) {
 
 async function fetchRoute(callsign) {
   if (routeCache.has(callsign)) return routeCache.get(callsign);
+  // Note: 404s for unknown callsigns are expected and routine for GA traffic.
+  // The browser will log "Failed to load resource: 404" — that's harmless and
+  // unsuppressable from JS. We treat 404 as "no data, don't retry".
   try {
     const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`,
       { signal: AbortSignal.timeout(8000) });
@@ -1123,8 +1126,11 @@ function renderTable(flights) {
 
     // Route cell:
     //  1. If route data is in cache, render the rich version with cities.
-    //  2. Otherwise, if we observed this aircraft on the ground here recently,
-    //     show "<our_icao> → ?" — they almost certainly departed from us.
+    //  2. Otherwise, infer from observed history:
+    //     - Currently on ground here → ? → KSEZ → ? (could be either direction)
+    //     - Was airborne, now on ground → witnessed arrival: ? → KSEZ
+    //     - Was on ground, now airborne → witnessed departure: KSEZ → ?
+    //     - Just airborne, was on ground recently → departed from us: KSEZ → ?
     //  3. Else, show "—" (will be patched async by enrichRoutes if data found).
     const cached = f.callsign ? routeCache.get(f.callsign) : null;
     const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
@@ -1132,15 +1138,34 @@ function renderTable(flights) {
     if (cached) {
       routeCell = renderRouteCell(cached, CFG.icao, iataUs);
     } else {
-      // Check if we've seen this hex on the ground here recently
       const hist = flightHistory.get(f.hex);
-      const sawGround = hist && hist.some(s => s.on_ground && (Date.now() - s.ts) < 600000); // 10 min
-      if (sawGround && f.status !== 'GROUND' && f.status !== 'TAXIING') {
-        routeCell = `<div class="td-route-row">
-          <span class="td-route-orig td-route-here">${CFG.icao}</span>
-          <span class="td-route-arr-inline">→</span>
-          <span class="td-route-dest" style="color:var(--txt3)">?</span>
-        </div>`;
+      const NOW = Date.now();
+      // Did we ever see this aircraft airborne in our window?
+      const wasAirborne = hist && hist.some(s => !s.on_ground);
+      // Did we ever see it on the ground in our window?
+      const wasGround   = hist && hist.some(s => s.on_ground && (NOW - s.ts) < 900000); // 15 min
+      const isOnGround  = f.on_ground;
+
+      let inferOrig = null, inferDest = null;
+      if (isOnGround && wasAirborne) {
+        // Just landed here — we witnessed a flight come in
+        inferDest = CFG.icao;
+      } else if (isOnGround && !wasAirborne) {
+        // On ground but never seen flying — about to depart from here
+        inferOrig = CFG.icao;
+      } else if (!isOnGround && wasGround) {
+        // Currently airborne, was on ground recently — just departed from here
+        inferOrig = CFG.icao;
+      }
+
+      if (inferOrig || inferDest) {
+        const origHtml = inferOrig
+          ? `<span class="td-route-orig td-route-here">${inferOrig}</span>`
+          : `<span class="td-route-orig" style="color:var(--txt3)">?</span>`;
+        const destHtml = inferDest
+          ? `<span class="td-route-dest td-route-here">${inferDest}</span>`
+          : `<span class="td-route-dest" style="color:var(--txt3)">?</span>`;
+        routeCell = `<div class="td-route-row">${origHtml}<span class="td-route-arr-inline">→</span>${destHtml}</div>`;
       } else {
         routeCell = `<div class="td-route-orig" style="color:var(--txt3)">—</div>`;
       }
