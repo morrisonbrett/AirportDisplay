@@ -639,29 +639,93 @@ function bearingTo(lat1, lon1, lat2, lon2) {
 function hdgDiff(a, b) { return Math.abs(((a-b)+540)%360-180); }
 
 // ── STATUS DETERMINATION ──────────────────────────────────────────────────
-// Per-aircraft history + hysteresis. A single ADS-B snapshot can't reliably
-// classify a flight phase — banking turns, flare-out, baro lag all produce
-// noisy values. Trends over the last few minutes are stable.
+// Approach inspired by Junzi Sun et al., "Flight Extraction and Phase
+// Identification for Large ADS-B Datasets" (TU Delft, 2017) — the canonical
+// 97.8%-accurate fuzzy-logic reference. Adapted for our use case (single
+// airport, real-time snapshots) with these key adaptations:
 //
-// Two state stores (always maintained, even when audio is disarmed):
-//   flightHistory: hex → [last 12 samples, ~6 min at 30s refresh]
-//   lastStatus:    hex → previous cycle's status (for hysteresis + chimes)
+// 1. SEPARATE TWO QUESTIONS. First classify the *aircraft's flight phase*
+//    (climb/descend/level/ground/taxi). Then assess *association with our
+//    airport* (closing, on glide slope, route confirms, etc.). The final
+//    status combines both.
+//
+// 2. FUZZY SCORING, not hard thresholds. Each piece of evidence contributes
+//    a soft 0–1 confidence. A plane at 320 fpm shouldn't flicker between
+//    OVERFLY and ARRIVING because of a 200 fpm cliff — it should produce a
+//    moderate "descending" score that combines with other evidence.
+//
+// 3. SMOOTHED TRAJECTORY DATA. Snapshot vs/track are noisy (banking turns,
+//    baro lag). All trends computed over rolling 90-second window using
+//    linear regression on history.
+//
+// 4. ON-GROUND TRANSITION = strongest departure signal. If we observed this
+//    aircraft on the ground in the last 5 minutes and it's now airborne,
+//    that's a takeoff with very high confidence.
+//
+// 5. HYSTERESIS. Once a status is assigned with enough confidence, it
+//    persists unless contradicted by strong opposing evidence — not just
+//    flipped by a noisy reading.
 //
 // State model:
-//   GROUND    — on ground, stationary
-//   TAXIING   — on ground, moving (rollout, taxi)
-//   DEPARTING — was on ground recently OR (climbing + heading away + low AGL)
-//   ARRIVING  — closing distance + descending + on glidepath corridor
-//   PATTERN   — circling close, low, slow (touch-and-goes)
-//   OVERFLY   — passing through; no commitment to land or recently-departed signature
+//   GROUND    — on ground, stationary (gs ≤ 5 kt)
+//   TAXIING   — on ground, moving (gs > 5 kt)
+//   DEPARTING — recently airborne from this field, climbing, low
+//   ARRIVING  — descending toward us, on glide-slope corridor
+//   PATTERN   — close, low, slow, level (touch-and-goes)
+//   OVERFLY   — passing through; nothing related to this airport
 
 const flightHistory = new Map();
 const lastStatus    = new Map();
-const HIST_MAX_SAMPLES   = 12;       // ~6 min at 30s refresh
-const RECENT_GROUND_MS   = 180000;   // 3 min — counts as "just departed"
+const HIST_MAX_SAMPLES = 20;       // ~10 min at 30s refresh
+const RECENT_GROUND_MS = 300000;   // 5 min — counts as "just departed"
+
+// ── Fuzzy membership helpers (smooth ramps; no hard cliffs) ──────────────
+// Returns 0 below `lo`, ramps to 1 at `hi` (linear)
+function rampUp(x, lo, hi) {
+  if (x == null || isNaN(x)) return 0;
+  if (x <= lo) return 0;
+  if (x >= hi) return 1;
+  return (x - lo) / (hi - lo);
+}
+// Returns 1 below `lo`, ramps to 0 at `hi` (linear)
+function rampDown(x, lo, hi) {
+  if (x == null || isNaN(x)) return 0;
+  if (x <= lo) return 1;
+  if (x >= hi) return 0;
+  return (hi - x) / (hi - lo);
+}
+// Trapezoid: 0 below lo1, 1 between lo2..hi1, 0 above hi2
+function trapezoid(x, lo1, lo2, hi1, hi2) {
+  if (x == null || isNaN(x)) return 0;
+  if (x <= lo1 || x >= hi2) return 0;
+  if (x <= lo2) return (x - lo1) / (lo2 - lo1);
+  if (x >= hi1) return (hi2 - x) / (hi2 - hi1);
+  return 1;
+}
+
+// Linear regression slope on samples [{ts, val}] — returns units per minute
+function linRegSlope(samples, valKey) {
+  if (samples.length < 2) return null;
+  const t0 = samples[0].ts;
+  const xs = samples.map(s => (s.ts - t0) / 60000);              // minutes
+  const ys = samples.map(s => s[valKey]).filter(v => v != null);
+  if (ys.length < 2) return null;
+  const xsValid = samples
+    .map((s, i) => s[valKey] != null ? xs[i] : null)
+    .filter(v => v != null);
+  const n = ys.length;
+  const xm = xsValid.reduce((a, b) => a + b, 0) / n;
+  const ym = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (xsValid[i] - xm) * (ys[i] - ym);
+    den += (xsValid[i] - xm) ** 2;
+  }
+  return den === 0 ? null : num / den;
+}
 
 function getStatus(f) {
-  // 1. Record this sample (always, even before classification)
+  // ── 1. Record sample ────────────────────────────────────────────────────
   let hist = flightHistory.get(f.hex);
   if (!hist) { hist = []; flightHistory.set(f.hex, hist); }
   hist.push({
@@ -671,97 +735,121 @@ function getStatus(f) {
   });
   while (hist.length > HIST_MAX_SAMPLES) hist.shift();
 
-  // 2. Ground states are definitive — trust on_ground from ADS-B
-  if (f.on_ground) {
-    return (f.gs || 0) > 5 ? 'TAXIING' : 'GROUND';
-  }
+  // ── 2. Definitive ground states ─────────────────────────────────────────
+  if (f.on_ground) return (f.gs || 0) > 5 ? 'TAXIING' : 'GROUND';
 
-  // 3. Airborne — derived values
+  // ── 3. Derived values ───────────────────────────────────────────────────
   const elev = CFG.elev || 0;
   const agl  = f.alt_ft != null ? f.alt_ft - elev : null;
   const vs   = f.baro_rate || 0;
   const spd  = f.gs || 0;
   const prev = lastStatus.get(f.hex);
 
-  // 4. History-based trends (require ≥ 2 samples spaced > 18s apart)
-  let altTrend = null, distTrend = null;
-  if (hist.length >= 2) {
-    const o = hist[0], n = hist[hist.length - 1];
-    const dtMin = (n.ts - o.ts) / 60000;
-    if (dtMin > 0.3) {
-      if (o.alt != null && n.alt != null) altTrend = (n.alt - o.alt) / dtMin;
-      distTrend = (n.dist - o.dist) / dtMin;
-    }
-  }
-
-  // 5. Was recently on the ground? Strong "just departed" signal
+  // ── 4. Smoothed trends from rolling window (90s lookback) ──────────────
   const NOW = Date.now();
+  const window = hist.filter(s => NOW - s.ts <= 90000);
+  const altSlope  = linRegSlope(window, 'alt');   // ft/min
+  const distSlope = linRegSlope(window, 'dist');  // nm/min
+  // Robust climb/descend/closing — use smoothed when available, instantaneous as fallback
+  const altRate  = altSlope  != null ? altSlope  : vs;
+  const distRate = distSlope != null ? distSlope : null;
+
+  // ── 5. On-ground transition (strongest departure evidence) ──────────────
   const recentlyGrounded = hist.some(s => s.on_ground && (NOW - s.ts) < RECENT_GROUND_MS);
 
-  // 6. Heading geometry
+  // ── 6. Heading geometry ─────────────────────────────────────────────────
   const brg    = bearingTo(f.lat, f.lon, CFG.lat, CFG.lon);
   const diff   = hdgDiff(f.track || 0, brg);
-  const toward = diff < 45;
-  const away   = diff > 105;
+  // Soft scores, not bool
+  const towardScore = rampDown(diff,  30, 70);   // 1 if heading directly at us, 0 if >70° off
+  const awayScore   = rampUp(diff,   95, 130);   // 1 if 130°+ off bearing, 0 if ≤95°
 
-  // 7. Route cache cross-check
+  // ── 7. Route cache ──────────────────────────────────────────────────────
   const cached = f.callsign ? routeCache.get(f.callsign) : null;
   const dest   = cached?.dest || null;
+  const orig   = cached?.orig || null;
   const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
   const destHere      = dest && (dest === CFG.icao || dest === iataUs);
   const destElsewhere = dest && !destHere;
+  const origHere      = orig && (orig === CFG.icao || orig === iataUs);
+  const origElsewhere = orig && !origHere;
 
-  // 8. Robust descending / closing flags
-  // Use trend if we have enough history; fall back to instantaneous values otherwise.
-  const descending = (altTrend != null) ? altTrend < -100 : vs < -150;
-  const climbing   = (altTrend != null) ? altTrend >  100 : vs >  200;
-  const closing    = (distTrend != null) ? distTrend < -0.3 : (toward && spd > 50);
-  const departing  = (distTrend != null) ? distTrend >  0.3 : away;
-
-  // ─── DEPARTING ───────────────────────────────────────────────────────────
-  // Just lifted off — strongest signal we have
-  if (recentlyGrounded && agl != null && agl < 6000 && f.dist < 15) {
-    return 'DEPARTING';
+  // ── 8. Glide slope angle (degrees) — the proper geometric measure ──────
+  // angle = atan(AGL / horizontal_distance). 3° standard, 5° steep, <1° too shallow
+  let glideAngle = null;
+  if (agl != null && agl > 0 && f.dist > 0.1) {
+    const aglFt   = agl;
+    const distFt  = f.dist * 6076.12; // nm → ft
+    glideAngle    = Math.atan2(aglFt, distFt) * 180 / Math.PI;
   }
-  // Hysteresis: previously DEPARTING and still climbing/moving away — sticky
-  if (prev === 'DEPARTING' && agl != null && agl < 15000 && f.dist < 30) {
-    if ((climbing || vs > 0) && (departing || away)) return 'DEPARTING';
-  }
+  // Score: peak around 3°, acceptable 1°–6°
+  const onSlopeScore = glideAngle != null
+    ? trapezoid(glideAngle, 0.5, 1.5, 5.0, 7.0)
+    : 0;
 
-  // ─── ARRIVING ────────────────────────────────────────────────────────────
-  if (!destElsewhere && agl != null) {
-    // Glidepath ceiling: AGL ≤ dist × 530 ft (5° approach max).
-    // No floor — on short final AGL approaches 0.
-    const onCorridor = agl <= f.dist * 530 + 200 && agl >= -300;
+  // ── 9. Phase classification (Junzi-Sun-style fuzzy) ─────────────────────
+  const climbScore   = rampUp(altRate,   100,  500);   // climbing if rising 100–500 fpm
+  const descendScore = rampUp(-altRate,  100,  500);   // descending if falling 100–500 fpm
+  const levelScore   = rampDown(Math.abs(altRate), 100, 400);
+  const closingScore = distRate != null ? rampUp(-distRate, 0.3, 2.0) : 0;
+  const departScore  = distRate != null ? rampUp( distRate, 0.3, 2.0) : 0;
+  const lowScore     = agl != null ? rampDown(agl, 4000, 10000) : 0;
+  const veryLowScore = agl != null ? rampDown(agl, 1500, 4000)  : 0;
+  const closeScore   = rampDown(f.dist, 5,  15);
+  const nearScore    = rampDown(f.dist, 12, 25);
 
-    if (f.dist < 4) {
-      // Very close: on final approach OR pattern OR just touched down
-      if (descending && (toward || closing || prev === 'ARRIVING')) return 'ARRIVING';
-      if (agl < 2500 && spd < 200 && Math.abs(vs) < 600) return 'PATTERN';
-    }
-    else if (f.dist < 12) {
-      // Strong arrival signal
-      if (closing && descending && onCorridor && toward) return 'ARRIVING';
-      // Hysteresis: once arriving, stay arriving while still descending toward us
-      if (prev === 'ARRIVING' && descending && onCorridor && !departing) return 'ARRIVING';
-    }
-    else if (f.dist < 25) {
-      // Tighter requirements at distance
-      if (closing && descending && onCorridor && diff < 35) return 'ARRIVING';
-      if (destHere && descending) return 'ARRIVING';
-      // Hysteresis: stay arriving if still closing and descending
-      if (prev === 'ARRIVING' && closing && descending) return 'ARRIVING';
-    }
+  // ── 10. ARRIVING score ──────────────────────────────────────────────────
+  // Need: descending + on slope + closing OR heading toward + within 25 nm
+  let arrivingScore = 0;
+  if (!destElsewhere) {
+    const descending  = descendScore;
+    const approaching = Math.max(closingScore, towardScore * 0.85);
+    arrivingScore = descending * approaching * onSlopeScore * nearScore;
+    // Route confirms us: huge boost
+    if (destHere) arrivingScore = Math.max(arrivingScore, descending * 0.9);
+    // Very close + low + slow = on final, even without perfect signals
+    if (f.dist < 4 && agl != null && agl < 2500 && spd < 200 && descending > 0.2)
+      arrivingScore = Math.max(arrivingScore, 0.85);
   }
 
-  // ─── DEPARTING (secondary geometry-based check) ─────────────────────────
-  // Climbing + heading away + low + close — likely just departed, even if
-  // we missed the on-ground sample
-  if (f.dist < 12 && agl != null && agl >= 0 && agl < 5000
-      && climbing && away && spd > 60) {
-    return 'DEPARTING';
+  // ── 11. DEPARTING score ─────────────────────────────────────────────────
+  let departingScore = 0;
+  // Strongest: was on ground here recently
+  if (recentlyGrounded && agl != null && agl < 8000 && f.dist < 20) {
+    departingScore = 0.95;
+  }
+  // Origin confirmed as us via route data
+  if (origHere && climbScore > 0.3 && f.dist < 30) {
+    departingScore = Math.max(departingScore, 0.9);
+  }
+  // Geometric: climbing + heading away + low + close
+  const geomDepart = climbScore * awayScore * lowScore * closeScore;
+  departingScore = Math.max(departingScore, geomDepart);
+
+  // ── 12. PATTERN score ───────────────────────────────────────────────────
+  // Close, low, slow, not strongly climbing or descending
+  const slowScore = rampDown(spd, 100, 200);
+  let patternScore = 0;
+  if (f.dist < 6 && !destElsewhere) {
+    patternScore = veryLowScore * slowScore * levelScore;
   }
 
+  // ── 13. Hysteresis — sticky states ─────────────────────────────────────
+  // If we already classified this plane and conditions are still consistent,
+  // boost the previous classification's score so noise can't flip it.
+  if (prev === 'ARRIVING'  && descendScore > 0.3 && departScore < 0.5) arrivingScore  *= 1.3;
+  if (prev === 'DEPARTING' && climbScore   > 0.3 && closingScore < 0.5) departingScore *= 1.3;
+  if (prev === 'PATTERN'   && f.dist < 8) patternScore *= 1.3;
+
+  // ── 14. Decision: highest score above confidence threshold wins ─────────
+  const CONF = 0.35; // require at least this much confidence to leave OVERFLY
+  const scores = [
+    { name: 'ARRIVING',  score: arrivingScore  },
+    { name: 'DEPARTING', score: departingScore },
+    { name: 'PATTERN',   score: patternScore   },
+  ].sort((a, b) => b.score - a.score);
+
+  if (scores[0].score >= CONF) return scores[0].name;
   return 'OVERFLY';
 }
 
