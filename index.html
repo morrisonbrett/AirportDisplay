@@ -1053,99 +1053,107 @@ function renderRouteCell(route, currentIcao, currentIata) {
 }
 
 // ── ROUTE ENRICHMENT (multi-tier) ─────────────────────────────────────────
-// Tier 1: adsbdb.com   — keyed by callsign — covers commercial filed plans (IFR)
-// Tier 2: OpenSky      — keyed by icao24   — covers GA/VFR via track-derived
-//                                            departure airport from ADS-B history
-// Tier 2 has rate limits (100-400 anon calls/day), so we throttle to 1 call
-// per ~3s and cache aggressively. Once an icao24 has been resolved (or marked
-// unresolvable), we never look it up again this session.
+// Tier 1: adsbdb.com — keyed by callsign — rich data (city, full airport name)
+//                      for filed/scheduled commercial flights (IFR plans)
+// Tier 2: hexdb.io   — keyed by callsign — community ADS-B route database with
+//                      broader GA coverage, ~1.1M req/day, open CORS.
 //
-// Cache layouts:
-//   routeCache:        callsign → { orig, origCity, ..., dest, destCity, ... } | null
-//   icaoRouteCache:    icao24   → { orig, origCity, dest, destCity }            | null
-//   icaoRouteAttempts: icao24   → timestamp of last lookup (rate-limit gate)
+// hexdb returns ICAO codes only ("EGLL-LEBL"). We map to city names via a
+// local lookup table when possible, otherwise show the ICAO code only.
 
-const icaoRouteCache    = new Map();
-const icaoRouteAttempts = new Map();
+const tier2Cache    = new Map(); // callsign → {orig,dest,origCity,destCity} | null
+const tier2Attempts = new Map(); // callsign → last attempt timestamp
 
-// Tiny throttled queue — one OpenSky call at a time, paced
-let openSkyQueue = [];
-let openSkyBusy  = false;
-async function processOpenSkyQueue() {
-  if (openSkyBusy || openSkyQueue.length === 0) return;
-  openSkyBusy = true;
-  const job = openSkyQueue.shift();
-  try { await job(); } catch(e) { /* swallow */ }
-  // Pace requests ~1 every 3.5s — gives us ~1000/hr headroom under 4000/day
-  setTimeout(() => { openSkyBusy = false; processOpenSkyQueue(); }, 3500);
+// Throttled queue for hexdb — be polite, paced ~1 every 2 seconds
+let hexQueue = [];
+let hexBusy  = false;
+async function processHexQueue() {
+  if (hexBusy || hexQueue.length === 0) return;
+  hexBusy = true;
+  const job = hexQueue.shift();
+  try { await job(); } catch(e) {}
+  setTimeout(() => { hexBusy = false; processHexQueue(); }, 2000);
 }
-function enqueueOpenSky(job) {
-  openSkyQueue.push(job);
-  processOpenSkyQueue();
+function enqueueHex(job) {
+  hexQueue.push(job);
+  processHexQueue();
 }
 
-// Approximate ICAO airport codes → city names (limited; OpenSky returns ICAO only)
-// We fall back to showing just the ICAO if we don't have the city locally.
+// ICAO airport → city map. Used to enrich Tier 2 results which only return
+// ICAO codes. Falls through to "?" when not found.
 const ICAO_CITIES = {
   KSEZ:'Sedona',         KPHX:'Phoenix',         KSDL:'Scottsdale',
   KFFZ:'Mesa',           KGYR:'Goodyear',        KDVT:'Phoenix',
   KTUS:'Tucson',         KPRC:'Prescott',        KFLG:'Flagstaff',
-  KIWA:'Mesa',           KCMA:'Camarillo',       KSBA:'Santa Barbara',
-  KLAX:'Los Angeles',    KSFO:'San Francisco',   KSJC:'San Jose',
-  KOAK:'Oakland',        KSNA:'Santa Ana',       KSAN:'San Diego',
-  KBUR:'Burbank',        KLGB:'Long Beach',      KVNY:'Van Nuys',
-  KLAS:'Las Vegas',      KRNO:'Reno',            KDFW:'Dallas',
-  KDAL:'Dallas',         KAUS:'Austin',          KIAH:'Houston',
-  KORD:"Chicago",        KMDW:'Chicago',         KJFK:'New York',
-  KLGA:'New York',       KEWR:'Newark',          KBOS:'Boston',
-  KMIA:'Miami',          KMCO:'Orlando',         KATL:'Atlanta',
-  KSEA:'Seattle',        KPDX:'Portland',        KDEN:'Denver',
-  KSLC:'Salt Lake City', KABQ:'Albuquerque',     KBZN:'Bozeman',
-  KBOI:'Boise',          KJAC:'Jackson',         KASE:'Aspen',
-  KEGE:'Vail',           KCOS:'Colorado Springs',KSAF:'Santa Fe',
-  KSGU:'St George',      KCDC:'Cedar City',      KGCN:'Grand Canyon',
+  KIWA:'Mesa',           KCHD:'Chandler',        KCGZ:'Casa Grande',
+  KCMA:'Camarillo',      KSBA:'Santa Barbara',   KLAX:'Los Angeles',
+  KSFO:'San Francisco',  KSJC:'San Jose',        KOAK:'Oakland',
+  KSNA:'Santa Ana',      KSAN:'San Diego',       KBUR:'Burbank',
+  KLGB:'Long Beach',     KVNY:'Van Nuys',        KCCR:'Concord',
+  KSTS:'Santa Rosa',     KSMF:'Sacramento',      KFAT:'Fresno',
+  KMRY:'Monterey',       KPSP:'Palm Springs',    KONT:'Ontario',
+  KCNO:'Chino',          KRAL:'Riverside',       KSBP:'San Luis Obispo',
+  KOXR:'Oxnard',         KPRB:'Paso Robles',     KAVX:'Catalina',
+  KLAS:'Las Vegas',      KRNO:'Reno',            KHND:'Henderson',
+  KDFW:'Dallas',         KDAL:'Dallas',          KAUS:'Austin',
+  KHOU:'Houston',        KIAH:'Houston',         KSAT:'San Antonio',
+  KAMA:'Amarillo',       KELP:'El Paso',         KORD:'Chicago',
+  KMDW:'Chicago',        KJFK:'New York',        KLGA:'New York',
+  KEWR:'Newark',         KTEB:'Teterboro',       KMIA:'Miami',
+  KMCO:'Orlando',        KTPA:'Tampa',           KFLL:'Ft Lauderdale',
+  KAPF:'Naples',         KBOS:'Boston',          KPHL:'Philadelphia',
+  KPIT:'Pittsburgh',     KDTW:'Detroit',         KMSP:'Minneapolis',
+  KSTL:'St Louis',       KMCI:'Kansas City',     KCMH:'Columbus',
+  KCLE:'Cleveland',      KCVG:'Cincinnati',      KBNA:'Nashville',
+  KMEM:'Memphis',        KMSY:'New Orleans',     KBWI:'Baltimore',
+  KIAD:'Washington',     KDCA:'Washington',      KCLT:'Charlotte',
+  KRDU:'Raleigh',        KAVL:'Asheville',       KSEA:'Seattle',
+  KBFI:'Seattle',        KPDX:'Portland',        KEUG:'Eugene',
+  KDEN:'Denver',         KCOS:'Colo Springs',    KASE:'Aspen',
+  KEGE:'Vail',           KGJT:'Grand Jct',       KSLC:'Salt Lake',
+  KOGD:'Ogden',          KSGU:'St George',       KCDC:'Cedar City',
+  KABQ:'Albuquerque',    KSAF:'Santa Fe',        KROW:'Roswell',
+  KBZN:'Bozeman',        KGTF:'Great Falls',     KBIL:'Billings',
+  KMSO:'Missoula',       KBOI:'Boise',           KTWF:'Twin Falls',
+  KJAC:'Jackson',        KCPR:'Casper',          KGCN:'Grand Canyon',
   KIFP:'Bullhead City',  KPGA:'Page',            KSOW:'Show Low',
-  KPAN:'Payson',         KCGZ:'Casa Grande',     KCHD:'Chandler',
+  KPAN:'Payson',
 };
 function cityFor(icao) { return ICAO_CITIES[icao] || null; }
 
-async function fetchRouteByIcao24(hex) {
-  if (icaoRouteCache.has(hex)) return icaoRouteCache.get(hex);
-  // Don't re-attempt within an hour
-  const lastAttempt = icaoRouteAttempts.get(hex) || 0;
+// Tier 2: hexdb.io callsign → route lookup
+async function fetchRouteHexdb(callsign) {
+  if (tier2Cache.has(callsign)) return tier2Cache.get(callsign);
+  // Throttle re-attempts to once per hour per callsign
+  const lastAttempt = tier2Attempts.get(callsign) || 0;
   if (Date.now() - lastAttempt < 3600000) return null;
-  icaoRouteAttempts.set(hex, Date.now());
+  tier2Attempts.set(callsign, Date.now());
 
   return new Promise(resolve => {
-    enqueueOpenSky(async () => {
+    enqueueHex(async () => {
       try {
-        // Look back 24 hours for this aircraft's most recent flight
-        const end   = Math.floor(Date.now() / 1000);
-        const begin = end - 86400;
-        const url = `https://opensky-network.org/api/flights/aircraft?icao24=${hex.toLowerCase()}&begin=${begin}&end=${end}`;
-        const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) { icaoRouteCache.set(hex, null); resolve(null); return; }
-        const arr = await r.json();
-        if (!Array.isArray(arr) || arr.length === 0) {
-          icaoRouteCache.set(hex, null); resolve(null); return;
+        const url = `https://hexdb.io/api/v1/route/icao/${encodeURIComponent(callsign)}`;
+        const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!r.ok) { tier2Cache.set(callsign, null); resolve(null); return; }
+        const d = await r.json();
+        // Response: { flight: "EIN17A", route: "EIDW-EGLL", updatetime: 1397991739 }
+        if (!d?.route || typeof d.route !== 'string') {
+          tier2Cache.set(callsign, null); resolve(null); return;
         }
-        // Most recent flight is last in the array
-        const last = arr[arr.length - 1];
+        const parts = d.route.split('-');
+        const orig  = parts[0] || null;
+        const dest  = parts[parts.length - 1] || null; // last segment in case of via points
+        if (!orig && !dest) { tier2Cache.set(callsign, null); resolve(null); return; }
         const route = {
-          orig:     last.estDepartureAirport || null,
-          origCity: cityFor(last.estDepartureAirport),
-          origName: null,
-          dest:     last.estArrivalAirport   || null,
-          destCity: cityFor(last.estArrivalAirport),
-          destName: null,
+          orig, dest,
+          origCity: cityFor(orig),
+          destCity: cityFor(dest),
+          origName: null, destName: null,
         };
-        if (!route.orig && !route.dest) {
-          icaoRouteCache.set(hex, null); resolve(null); return;
-        }
-        icaoRouteCache.set(hex, route);
+        tier2Cache.set(callsign, route);
         resolve(route);
       } catch(e) {
-        icaoRouteCache.set(hex, null); resolve(null);
+        tier2Cache.set(callsign, null); resolve(null);
       }
     });
   });
@@ -1178,22 +1186,21 @@ async function fetchRoute(callsign) {
 }
 
 // After initial render, look up routes for all flights and patch DOM cells.
-// Two-tier lookup: try adsbdb (filed plans) first, fall back to OpenSky
-// (track-derived from ADS-B history) for unmatched aircraft.
+// Two-tier lookup: try adsbdb (filed plans) first, fall back to hexdb.io
+// (community ADS-B route database with broader GA coverage).
 function enrichRoutes(flights) {
   const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
 
   flights.forEach(async f => {
+    if (!f.callsign) return;
     let route = null;
 
-    // Tier 1: filed flight plan via adsbdb (callsign keyed)
-    if (f.callsign) {
-      route = await fetchRoute(f.callsign);
-    }
+    // Tier 1: filed flight plan via adsbdb
+    route = await fetchRoute(f.callsign);
 
-    // Tier 2: track-derived via OpenSky (icao24 keyed) for missing routes
-    if (!route && f.hex) {
-      route = await fetchRouteByIcao24(f.hex);
+    // Tier 2: community route database via hexdb.io
+    if (!route) {
+      route = await fetchRouteHexdb(f.callsign);
     }
 
     if (!route) return;
@@ -1242,8 +1249,7 @@ function renderTable(flights) {
     //     - Status is ARRIVING → ? → KSEZ
     //     - Status is DEPARTING → KSEZ → ?
     //  3. Else, show "—" (will be patched async by enrichRoutes if data found).
-    const cached = (f.callsign && routeCache.get(f.callsign))
-                || (f.hex && icaoRouteCache.get(f.hex))
+    const cached = (f.callsign && (routeCache.get(f.callsign) || tier2Cache.get(f.callsign)))
                 || null;
     const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
     let routeCell;
