@@ -125,14 +125,14 @@
     th.r, td.r { text-align:right; }
     th.c, td.c { text-align:center; }
 
-    .c-id   { width:16%; }
-    .c-type { width:19%; }
-    .c-route{ width:13%; }
+    .c-id   { width:15%; }
+    .c-type { width:18%; }
+    .c-route{ width:16%; }
     .c-alt  { width:13%; }
     .c-spd  { width:8%;  }
     .c-hdg  { width:6%;  }
     .c-dist { width:8%;  }
-    .c-sta  { width:17%; }
+    .c-sta  { width:16%; }
 
     .frow { border-bottom:1px solid rgba(30,58,100,.4); animation:rowIn .35s ease-out; }
     @keyframes rowIn { from{opacity:0;transform:translateX(-6px)} to{opacity:1;transform:none} }
@@ -145,9 +145,13 @@
     .td-mfr  { font-family:var(--f-ui); font-size:clamp(10px,.88vw,15px); color:var(--txt2); line-height:1.2; }
     .td-num  { font-family:var(--f-data); font-size:clamp(12px,1.25vw,20px); color:var(--txt); }
     .td-unit { font-family:var(--f-ui); font-size:clamp(8px,.68vw,12px); color:var(--txt3); margin-left:2px; }
-    .td-route-orig { font-family:var(--f-data); font-size:clamp(11px,1.1vw,17px); color:var(--txt2); letter-spacing:.04em; line-height:1.2; }
+    .td-route-orig { font-family:var(--f-data); font-size:clamp(11px,1.1vw,17px); color:var(--txt2); letter-spacing:.04em; line-height:1.15; }
     .td-route-arr  { font-family:var(--f-ui);  font-size:clamp(8px,.68vw,11px); color:var(--txt3); letter-spacing:.06em; }
-    .td-route-dest { font-family:var(--f-data); font-size:clamp(11px,1.1vw,17px); color:var(--txt); letter-spacing:.04em; }
+    .td-route-dest { font-family:var(--f-data); font-size:clamp(11px,1.1vw,17px); color:var(--txt); letter-spacing:.04em; line-height:1.15; }
+    .td-route-city { font-family:var(--f-ui); font-size:clamp(8px,.7vw,11px); color:var(--txt3); letter-spacing:.04em; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+    .td-route-row  { display:flex; align-items:baseline; gap:5px; }
+    .td-route-arr-inline { font-family:var(--f-ui); font-size:clamp(9px,.78vw,13px); color:var(--txt3); }
+    .td-route-here { color:var(--cyan); }   /* highlight when origin/dest is THIS airport */
 
     .alt-wrap { display:flex; align-items:center; gap:3px; justify-content:flex-end; }
     .alt-bar  { width:clamp(16px,1.8vw,30px); height:3px; background:var(--bd); border-radius:2px; overflow:hidden; flex-shrink:0; }
@@ -1018,7 +1022,35 @@ async function fetchFlights() {
 }
 
 // ── ROUTE ENRICHMENT (adsbdb.com, free, no key) ──────────────────────────
-// Cache: callsign → {orig, dest} or null (null = lookup attempted, no data)
+// Cache: callsign → { orig, origCity, origName, dest, destCity, destName } or null
+
+// Build the inner HTML of a route cell. Two-line layout:
+//   ORG → DST       (top: airport codes, FlightAware-style)
+//   City   City     (bottom: cities for context)
+// Origin/destination matching this airport are highlighted in cyan.
+function renderRouteCell(route, currentIcao, currentIata) {
+  if (!route || (!route.orig && !route.dest)) {
+    return `<div class="td-route-orig" style="color:var(--txt3)">—</div>`;
+  }
+  const isOrigHere = route.orig && (route.orig === currentIcao || route.orig === currentIata);
+  const isDestHere = route.dest && (route.dest === currentIcao || route.dest === currentIata);
+  const origCls = isOrigHere ? 'td-route-orig td-route-here' : 'td-route-orig';
+  const destCls = isDestHere ? 'td-route-dest td-route-here' : 'td-route-dest';
+  const orig = route.orig || '?';
+  const dest = route.dest || '?';
+  const origCity = route.origCity || '';
+  const destCity = route.destCity || '';
+  // Truncate cities so they fit
+  const trunc = (s, n) => s.length > n ? s.slice(0, n) + '…' : s;
+  return `<div class="td-route-row">
+    <span class="${origCls}">${orig}</span>
+    <span class="td-route-arr-inline">→</span>
+    <span class="${destCls}">${dest}</span>
+  </div>
+  ${(origCity || destCity)
+    ? `<div class="td-route-city">${trunc(origCity, 10)} · ${trunc(destCity, 10)}</div>`
+    : ''}`;
+}
 
 async function fetchRoute(callsign) {
   if (routeCache.has(callsign)) return routeCache.get(callsign);
@@ -1029,9 +1061,14 @@ async function fetchRoute(callsign) {
     const d = await r.json();
     const fr = d?.response?.flightroute;
     if (!fr) { routeCache.set(callsign, null); return null; }
+    const o = fr.origin, dst = fr.destination;
     const route = {
-      orig: fr.origin?.iata_code || fr.origin?.icao_code || null,
-      dest: fr.destination?.iata_code || fr.destination?.icao_code || null,
+      orig:     o?.iata_code   || o?.icao_code   || null,
+      origCity: o?.municipality || null,
+      origName: o?.name         || null,
+      dest:     dst?.iata_code  || dst?.icao_code || null,
+      destCity: dst?.municipality || null,
+      destName: dst?.name         || null,
     };
     routeCache.set(callsign, route);
     return route;
@@ -1044,17 +1081,16 @@ async function fetchRoute(callsign) {
 // After initial render, look up routes for all flights with callsigns
 // and patch the DOM cells in place — no full re-render
 function enrichRoutes(flights) {
+  const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
   flights.forEach(async f => {
     if (!f.callsign) return;
     const route = await fetchRoute(f.callsign);
-    if (!route?.orig && !route?.dest) return;
-    // Find the row and patch just the route cell (3rd td, index 2)
+    if (!route) return;
     const row = document.querySelector(`tr[data-hex="${f.hex}"]`);
     if (!row) return;
     const cell = row.querySelectorAll('td')[2];
     if (!cell) return;
-    cell.innerHTML = `<div class="td-route-orig">${route.orig || '?'}</div>
-                      <div class="td-route-arr">▸ ${route.dest || '?'}</div>`;
+    cell.innerHTML = renderRouteCell(route, CFG.icao, iataUs);
   });
 }
 
@@ -1081,17 +1117,34 @@ function renderTable(flights) {
     const showReg = (reg !== cs) ? reg : '';
     const typeTxt = f.typeCode || '—';
     const descTxt = f.desc ? (f.desc.length > 26 ? f.desc.slice(0,26)+'…' : f.desc) : '';
-    const orig    = f.orig || null;
-    const dest    = f.dest || null;
     const altPct  = f.alt_ft ? Math.min(100, (f.alt_ft/45000)*100) : 0;
     const cls     = STATUS_CLS[f.status] || 'OVR';
     const hdg     = f.track || 0;
 
-    // Route cell: show orig→dest if any, else show —
-    const routeCell = (orig || dest)
-      ? `<div class="td-route-orig">${orig||'?'}</div>
-         <div class="td-route-arr">▸ ${dest||'?'}</div>`
-      : `<div class="td-route-orig" style="color:var(--txt3)">—</div>`;
+    // Route cell:
+    //  1. If route data is in cache, render the rich version with cities.
+    //  2. Otherwise, if we observed this aircraft on the ground here recently,
+    //     show "<our_icao> → ?" — they almost certainly departed from us.
+    //  3. Else, show "—" (will be patched async by enrichRoutes if data found).
+    const cached = f.callsign ? routeCache.get(f.callsign) : null;
+    const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
+    let routeCell;
+    if (cached) {
+      routeCell = renderRouteCell(cached, CFG.icao, iataUs);
+    } else {
+      // Check if we've seen this hex on the ground here recently
+      const hist = flightHistory.get(f.hex);
+      const sawGround = hist && hist.some(s => s.on_ground && (Date.now() - s.ts) < 600000); // 10 min
+      if (sawGround && f.status !== 'GROUND' && f.status !== 'TAXIING') {
+        routeCell = `<div class="td-route-row">
+          <span class="td-route-orig td-route-here">${CFG.icao}</span>
+          <span class="td-route-arr-inline">→</span>
+          <span class="td-route-dest" style="color:var(--txt3)">?</span>
+        </div>`;
+      } else {
+        routeCell = `<div class="td-route-orig" style="color:var(--txt3)">—</div>`;
+      }
+    }
 
     return `<tr class="frow${f.on_ground?' gnd':''}" data-hex="${f.hex}">
       <td>
