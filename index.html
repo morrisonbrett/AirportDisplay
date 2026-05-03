@@ -1126,11 +1126,13 @@ function renderTable(flights) {
 
     // Route cell:
     //  1. If route data is in cache, render the rich version with cities.
-    //  2. Otherwise, infer from observed history:
-    //     - Currently on ground here → ? → KSEZ → ? (could be either direction)
-    //     - Was airborne, now on ground → witnessed arrival: ? → KSEZ
-    //     - Was on ground, now airborne → witnessed departure: KSEZ → ?
-    //     - Just airborne, was on ground recently → departed from us: KSEZ → ?
+    //  2. Otherwise infer from current observable state:
+    //     - On ground within 1nm of airport → it's AT our airport
+    //       (could be either pre-departure or post-arrival; show ? → KSEZ
+    //        if we've also seen it airborne, else KSEZ → ?)
+    //     - Currently TAXIING/GROUND status here → involve KSEZ
+    //     - Status is ARRIVING → ? → KSEZ
+    //     - Status is DEPARTING → KSEZ → ?
     //  3. Else, show "—" (will be patched async by enrichRoutes if data found).
     const cached = f.callsign ? routeCache.get(f.callsign) : null;
     const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
@@ -1139,23 +1141,24 @@ function renderTable(flights) {
       routeCell = renderRouteCell(cached, CFG.icao, iataUs);
     } else {
       const hist = flightHistory.get(f.hex);
-      const NOW = Date.now();
-      // Did we ever see this aircraft airborne in our window?
       const wasAirborne = hist && hist.some(s => !s.on_ground);
-      // Did we ever see it on the ground in our window?
-      const wasGround   = hist && hist.some(s => s.on_ground && (NOW - s.ts) < 900000); // 15 min
-      const isOnGround  = f.on_ground;
-
       let inferOrig = null, inferDest = null;
-      if (isOnGround && wasAirborne) {
-        // Just landed here — we witnessed a flight come in
+
+      // Use current status as the strongest signal — it's already been
+      // computed by our fuzzy logic to a high confidence threshold.
+      if (f.status === 'ARRIVING') {
         inferDest = CFG.icao;
-      } else if (isOnGround && !wasAirborne) {
-        // On ground but never seen flying — about to depart from here
+      } else if (f.status === 'DEPARTING') {
         inferOrig = CFG.icao;
-      } else if (!isOnGround && wasGround) {
-        // Currently airborne, was on ground recently — just departed from here
+      } else if (f.status === 'TAXIING' || f.status === 'GROUND') {
+        // On ground at our airport: if we ever saw it airborne, it landed here;
+        // otherwise we're seeing it pre-departure
+        if (wasAirborne) inferDest = CFG.icao;
+        else             inferOrig = CFG.icao;
+      } else if (f.status === 'PATTERN') {
+        // Touch-and-goes — use both
         inferOrig = CFG.icao;
+        inferDest = CFG.icao;
       }
 
       if (inferOrig || inferDest) {
