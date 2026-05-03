@@ -242,40 +242,46 @@
       .clock-z   { font-size:.55em; }
 
       /* Hide the map entirely on phones — stack the flights panel full width */
-      main { flex-direction:column; height:auto; min-height:calc(100vh - var(--hh) - var(--fh)); }
-      .flights-panel { flex:1 1 auto; border-right:none; }
+      main { flex-direction:column; height:auto; overflow:visible; }
+      .flights-panel { flex:1 1 auto; border-right:none; overflow:visible; }
       .map-panel { display:none; }
 
+      /* Critical: let the PAGE scroll, not an inner container.
+         Mobile browsers handle native page scroll much better than nested
+         overflow:auto, which often appears frozen on iOS. */
+      html, body { overflow-y:auto !important; height:auto !important; }
+      .tbl-wrap { overflow:visible; flex:none; }
+
       /* Tighter table for narrow screens — drop low-value columns */
-      .panel-hdr  { padding:.6vh 3vw; }
+      .panel-hdr  { padding:.6vh 3vw; position:sticky; top:0; background:var(--bg); z-index:6; }
       .panel-title{ font-size:9px; }
       .count-badge{ font-size:10px; }
 
-      thead th { font-size:8px; padding:.5vh 6px; letter-spacing:.1em; }
-      td       { padding:1vh 6px; }
-      /* Reallocate column widths and hide HDG (low value, tiny arrow) */
-      .c-id   { width:22%; }
-      .c-type { width:20%; }
-      .c-route{ width:16%; }
-      .c-alt  { width:14%; }
-      .c-spd  { width:10%; }
+      thead th { font-size:8px; padding:.5vh 5px; letter-spacing:.08em; }
+      td       { padding:1vh 5px; }
+      /* Reallocate: bigger STATUS column to fit "ARRIVING", smaller TYPE/ROUTE */
+      .c-id   { width:18%; }
+      .c-type { width:17%; }
+      .c-route{ width:14%; }
+      .c-alt  { width:13%; }
+      .c-spd  { width:9%;  }
       .c-hdg  { display:none; }
-      .c-dist { width:8%; }
-      .c-sta  { width:10%; }
-      td.c-hdg, th.c-hdg { display:none; }
-      /* Hide heading column more reliably via nth-child since c-hdg class is on TH only */
+      .c-dist { width:8%;  }
+      .c-sta  { width:21%; }
       thead th:nth-child(6),
       tbody td:nth-child(6) { display:none; }
 
-      .td-id   { font-size:13px; }
-      .td-sub  { font-size:10px; }
-      .td-type { font-size:12px; }
-      .td-mfr  { font-size:10px; }
-      .td-num  { font-size:13px; }
-      .td-unit { font-size:9px; }
-      .td-route-orig, .td-route-dest { font-size:11px; }
+      .td-id   { font-size:12px; letter-spacing:.04em; }
+      .td-sub  { font-size:9px; }
+      .td-type { font-size:11px; }
+      .td-mfr  { font-size:9px; }
+      .td-num  { font-size:12px; }
+      .td-unit { font-size:8px; margin-left:1px; }
+      .td-route-orig, .td-route-dest { font-size:10px; }
+      .td-route-arr-inline { font-size:9px; }
       .td-route-city { display:none; }   /* drop city line on mobile */
-      .badge   { font-size:9px; padding:2px 5px; letter-spacing:.08em; }
+      .badge   { font-size:9px; padding:3px 6px; letter-spacing:.08em; }
+      .badge::before { width:4px; height:4px; }
       .alt-bar { display:none; }   /* drop the mini bar to save space */
 
       /* Footer: compact, drop redundant info */
