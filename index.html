@@ -878,6 +878,9 @@ function getStatus(f) {
   const veryLowScore = agl != null ? rampDown(agl, 1500, 4000)  : 0;
   const closeScore   = rampDown(f.dist, 5,  15);
   const nearScore    = rampDown(f.dist, 12, 25);
+  // Altitude gate: planes above ~12 000 ft AGL are not on approach.
+  // Ramps from 1 (≤7 000 ft AGL) down to 0 (≥12 000 ft AGL).
+  const arrivalAltScore = agl != null ? rampDown(agl, 7000, 12000) : 0.3;
 
   // ── 10. ARRIVING score ──────────────────────────────────────────────────
   // Combine evidence as WEIGHTED AVERAGE not pure product — pure product
@@ -888,11 +891,11 @@ function getStatus(f) {
   if (!destElsewhere) {
     const approaching = Math.max(closingScore, towardScore);
     // Weighted average: descending (40%) + on-slope (30%) + approaching (30%)
-    // Then attenuated by proximity (linear gate at 25 nm).
+    // Then attenuated by proximity (linear gate at 25 nm) AND altitude gate.
     const evidence = (descendScore * 0.40) + (onSlopeScore * 0.30) + (approaching * 0.30);
-    arrivingScore = evidence * nearScore;
-    // Route confirms us → strong boost
-    if (destHere) arrivingScore = Math.max(arrivingScore, descendScore * 0.85);
+    arrivingScore = evidence * nearScore * arrivalAltScore;
+    // Route confirms us → strong boost (still altitude- and distance-gated)
+    if (destHere) arrivingScore = Math.max(arrivingScore, descendScore * nearScore * arrivalAltScore * 0.85);
     // Very close + low + slow = on final, even with imperfect signals
     if (f.dist < 4 && agl != null && agl < 2500 && spd < 200 && descendScore > 0.2)
       arrivingScore = Math.max(arrivingScore, 0.80);
