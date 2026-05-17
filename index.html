@@ -722,93 +722,48 @@ function bearingTo(lat1, lon1, lat2, lon2) {
 function hdgDiff(a, b) { return Math.abs(((a-b)+540)%360-180); }
 
 // ── STATUS DETERMINATION ──────────────────────────────────────────────────
-// Approach inspired by Junzi Sun et al., "Flight Extraction and Phase
-// Identification for Large ADS-B Datasets" (TU Delft, 2017) — the canonical
-// 97.8%-accurate fuzzy-logic reference. Adapted for our use case (single
-// airport, real-time snapshots) with these key adaptations:
+// Inspired by Fala, Falas & Falas, "A method for automatic airport operation
+// counts using crowd-sourced ADS-B data" (Oklahoma State University / Cambridge,
+// Aviation 2022, peer-reviewed). Their approach: a plane is landing if and only
+// if it is OBSERVED crossing a low altitude threshold inside a small bounding
+// box around the airport — not predicted from cruise behavior.
 //
-// 1. SEPARATE TWO QUESTIONS. First classify the *aircraft's flight phase*
-//    (climb/descend/level/ground/taxi). Then assess *association with our
-//    airport* (closing, on glide slope, route confirms, etc.). The final
-//    status combines both.
+// Adapted for real-time: a plane is ARRIVING/DEPARTING/PATTERN ONLY when its
+// CURRENT geometry firmly places it at the airport. There is no "speculative"
+// arriving — a 737 at FL320 is ALWAYS overfly, no matter what direction it is
+// heading or whether its vertical rate happens to dip momentarily negative.
 //
-// 2. FUZZY SCORING, not hard thresholds. Each piece of evidence contributes
-//    a soft 0–1 confidence. A plane at 320 fpm shouldn't flicker between
-//    OVERFLY and ARRIVING because of a 200 fpm cliff — it should produce a
-//    moderate "descending" score that combines with other evidence.
+// State machine:
+//   GROUND    — on ground, stationary  (definitive: on_ground=true, gs ≤ 5)
+//   TAXIING   — on ground, moving      (definitive: on_ground=true, gs > 5)
+//   ARRIVING  — airborne, on final/approach inside small box AND low AGL
+//                (≤ 6 nm AND ≤ 1500 ft AGL AND descending OR ≤ 3 nm AND ≤ 2500 AGL)
+//   DEPARTING — was on ground here recently AND now airborne AND still low
+//                (≤ 10 nm AND ≤ 5000 ft AGL AND climbing AND seen on_ground in last 5 min)
+//   PATTERN   — close & low & slow & roughly level (touch-and-goes)
+//                (≤ 4 nm AND ≤ 2000 ft AGL AND gs ≤ 150 kt AND |vs| < 800 fpm)
+//   OVERFLY   — everything else, including all high-altitude traffic
 //
-// 3. SMOOTHED TRAJECTORY DATA. Snapshot vs/track are noisy (banking turns,
-//    baro lag). All trends computed over rolling 90-second window using
-//    linear regression on history.
-//
-// 4. ON-GROUND TRANSITION = strongest departure signal. If we observed this
-//    aircraft on the ground in the last 5 minutes and it's now airborne,
-//    that's a takeoff with very high confidence.
-//
-// 5. HYSTERESIS. Once a status is assigned with enough confidence, it
-//    persists unless contradicted by strong opposing evidence — not just
-//    flipped by a noisy reading.
-//
-// State model:
-//   GROUND    — on ground, stationary (gs ≤ 5 kt)
-//   TAXIING   — on ground, moving (gs > 5 kt)
-//   DEPARTING — recently airborne from this field, climbing, low
-//   ARRIVING  — descending toward us, on glide-slope corridor
-//   PATTERN   — close, low, slow, level (touch-and-goes)
-//   OVERFLY   — passing through; nothing related to this airport
+// Anti-noise:
+//   - Trust on_ground from ADS-B (per ATC standard practice)
+//   - Hard upper bound: 6000 ft AGL absolutely cannot be ARRIVING here
+//   - Recent-ground observation needed for DEPARTING (no "phantom takeoffs")
+//   - Hysteresis: once classified, persist for 1 cycle of consistent evidence
 
 const flightHistory = new Map();
 const lastStatus    = new Map();
-const HIST_MAX_SAMPLES = 20;       // ~10 min at 30s refresh
-const RECENT_GROUND_MS = 300000;   // 5 min — counts as "just departed"
+const HIST_MAX_SAMPLES = 20;        // ~10 min at 30s refresh
+const RECENT_GROUND_MS = 300000;    // 5 min — counts as "just departed"
 
-// ── Fuzzy membership helpers (smooth ramps; no hard cliffs) ──────────────
-// Returns 0 below `lo`, ramps to 1 at `hi` (linear)
-function rampUp(x, lo, hi) {
-  if (x == null || isNaN(x)) return 0;
-  if (x <= lo) return 0;
-  if (x >= hi) return 1;
-  return (x - lo) / (hi - lo);
-}
-// Returns 1 below `lo`, ramps to 0 at `hi` (linear)
-function rampDown(x, lo, hi) {
-  if (x == null || isNaN(x)) return 0;
-  if (x <= lo) return 1;
-  if (x >= hi) return 0;
-  return (hi - x) / (hi - lo);
-}
-// Trapezoid: 0 below lo1, 1 between lo2..hi1, 0 above hi2
-function trapezoid(x, lo1, lo2, hi1, hi2) {
-  if (x == null || isNaN(x)) return 0;
-  if (x <= lo1 || x >= hi2) return 0;
-  if (x <= lo2) return (x - lo1) / (lo2 - lo1);
-  if (x >= hi1) return (hi2 - x) / (hi2 - hi1);
-  return 1;
-}
-
-// Linear regression slope on samples [{ts, val}] — returns units per minute
-function linRegSlope(samples, valKey) {
-  if (samples.length < 2) return null;
-  const t0 = samples[0].ts;
-  const xs = samples.map(s => (s.ts - t0) / 60000);              // minutes
-  const ys = samples.map(s => s[valKey]).filter(v => v != null);
-  if (ys.length < 2) return null;
-  const xsValid = samples
-    .map((s, i) => s[valKey] != null ? xs[i] : null)
-    .filter(v => v != null);
-  const n = ys.length;
-  const xm = xsValid.reduce((a, b) => a + b, 0) / n;
-  const ym = ys.reduce((a, b) => a + b, 0) / n;
-  let num = 0, den = 0;
-  for (let i = 0; i < n; i++) {
-    num += (xsValid[i] - xm) * (ys[i] - ym);
-    den += (xsValid[i] - xm) ** 2;
-  }
-  return den === 0 ? null : num / den;
-}
+// Hard ceiling — above this AGL, the aircraft simply CANNOT be classified
+// as arriving/departing/pattern here, regardless of any other signals.
+// 6,000 ft AGL puts you on a 30° slope at 1 nm out, which is physically
+// impossible for a normal approach. This is the safety belt that prevents
+// the 737-at-FL320 problem.
+const MAX_LOCAL_AGL_FT = 6000;
 
 function getStatus(f) {
-  // ── 1. Record sample ────────────────────────────────────────────────────
+  // ── 1. Record sample for history (used by trails + departure detection)
   let hist = flightHistory.get(f.hex);
   if (!hist) { hist = []; flightHistory.set(f.hex, hist); }
   hist.push({
@@ -819,130 +774,66 @@ function getStatus(f) {
   });
   while (hist.length > HIST_MAX_SAMPLES) hist.shift();
 
-  // ── 2. Definitive ground states ─────────────────────────────────────────
+  // ── 2. Ground states — definitive from ADS-B
   if (f.on_ground) return (f.gs || 0) > 5 ? 'TAXIING' : 'GROUND';
 
-  // ── 3. Derived values ───────────────────────────────────────────────────
+  // ── 3. Compute AGL — the most important number for everything below
   const elev = CFG.elev || 0;
   const agl  = f.alt_ft != null ? f.alt_ft - elev : null;
   const vs   = f.baro_rate || 0;
   const spd  = f.gs || 0;
-  const prev = lastStatus.get(f.hex);
 
-  // ── 4. Smoothed trends from rolling window (90s lookback) ──────────────
-  const NOW = Date.now();
-  const window = hist.filter(s => NOW - s.ts <= 90000);
-  const altSlope  = linRegSlope(window, 'alt');   // ft/min
-  const distSlope = linRegSlope(window, 'dist');  // nm/min
-  // Robust climb/descend/closing — use smoothed when available, instantaneous as fallback
-  const altRate  = altSlope  != null ? altSlope  : vs;
-  const distRate = distSlope != null ? distSlope : null;
+  // ── 4. HARD CEILING. The single most important check. Above this AGL,
+  //       no amount of heading/descending/closing can make a plane local to us.
+  if (agl == null || agl > MAX_LOCAL_AGL_FT) return 'OVERFLY';
 
-  // ── 5. On-ground transition (strongest departure evidence) ──────────────
-  const recentlyGrounded = hist.some(s => s.on_ground && (NOW - s.ts) < RECENT_GROUND_MS);
+  // ── 5. Distance check. Beyond 10 nm, we cannot reliably say this plane is
+  //       associated with our specific airport — there are too many other fields.
+  if (f.dist > 10) return 'OVERFLY';
 
-  // ── 6. Heading geometry ─────────────────────────────────────────────────
-  const brg    = bearingTo(f.lat, f.lon, CFG.lat, CFG.lon);
-  const diff   = hdgDiff(f.track || 0, brg);
-  const towardScore = rampDown(diff,  30, 70);   // 1 if heading directly at us, 0 if >70° off
-  const awayScore   = rampUp(diff,   80, 120);   // 1 if 120°+ off bearing, 0 if ≤80°
-
-  // ── 7. Route cache ──────────────────────────────────────────────────────
+  // ── 6. Route cache cross-check. If we KNOW the destination and it is not
+  //       us, this plane is definitionally not arriving here.
   const cached = f.callsign ? routeCache.get(f.callsign) : null;
   const dest   = cached?.dest || null;
-  const orig   = cached?.orig || null;
   const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
-  const destHere      = dest && (dest === CFG.icao || dest === iataUs);
-  const destElsewhere = dest && !destHere;
-  const origHere      = orig && (orig === CFG.icao || orig === iataUs);
-  const origElsewhere = orig && !origHere;
+  const destElsewhere = dest && dest !== CFG.icao && dest !== iataUs;
 
-  // ── 8. Glide slope angle (degrees) — the proper geometric measure ──────
-  let glideAngle = null;
-  if (agl != null && agl > 0 && f.dist > 0.1) {
-    const distFt = f.dist * 6076.12;
-    glideAngle   = Math.atan2(agl, distFt) * 180 / Math.PI;
+  // ── 7. DEPARTING — only if we OBSERVED this aircraft on the ground here recently
+  const NOW = Date.now();
+  const recentlyGrounded = hist.some(s => s.on_ground && (NOW - s.ts) < RECENT_GROUND_MS);
+  if (recentlyGrounded && agl < 5000) {
+    return 'DEPARTING';
   }
-  // Score: peak around 3°, acceptable 1°–6°
-  const onSlopeScore = glideAngle != null
-    ? trapezoid(glideAngle, 0.5, 1.5, 5.0, 7.0)
-    : 0;
 
-  // ── 9. Phase classification (Junzi-Sun-style fuzzy) ─────────────────────
-  const climbScore   = rampUp(altRate,   100,  500);
-  const descendScore = rampUp(-altRate,  100,  500);
-  const levelScore   = rampDown(Math.abs(altRate), 100, 400);
-  const closingScore = distRate != null ? rampUp(-distRate, 0.3, 2.0) : 0;
-  const departScore  = distRate != null ? rampUp( distRate, 0.3, 2.0) : 0;
-  const lowScore     = agl != null ? rampDown(agl, 4000, 10000) : 0;
-  const veryLowScore = agl != null ? rampDown(agl, 1500, 4000)  : 0;
-  const closeScore   = rampDown(f.dist, 5,  15);
-  const nearScore    = rampDown(f.dist, 12, 25);
-  // Altitude gate: planes above ~12 000 ft AGL are not on approach.
-  // Ramps from 1 (≤7 000 ft AGL) down to 0 (≥12 000 ft AGL).
-  const arrivalAltScore = agl != null ? rampDown(agl, 7000, 12000) : 0.3;
-
-  // ── 10. ARRIVING score ──────────────────────────────────────────────────
-  // Combine evidence as WEIGHTED AVERAGE not pure product — pure product
-  // collapses to ~0 even when all evidence is moderately positive.
-  // Required: must be descending AND on the glide slope. Heading-toward and
-  // closing-distance are corroborating but either alone suffices.
-  let arrivingScore = 0;
+  // ── 8. ARRIVING — only with strong, current geometric evidence.
+  //       Very close + very low + descending OR slow.
+  //       NEVER if cached destination says elsewhere.
   if (!destElsewhere) {
-    const approaching = Math.max(closingScore, towardScore);
-    // Weighted average: descending (40%) + on-slope (30%) + approaching (30%)
-    // Then attenuated by proximity (linear gate at 25 nm) AND altitude gate.
-    const evidence = (descendScore * 0.40) + (onSlopeScore * 0.30) + (approaching * 0.30);
-    arrivingScore = evidence * nearScore * arrivalAltScore;
-    // Route confirms us → strong boost (still altitude- and distance-gated)
-    if (destHere) arrivingScore = Math.max(arrivingScore, descendScore * nearScore * arrivalAltScore * 0.85);
-    // Very close + low + slow = on final, even with imperfect signals
-    if (f.dist < 4 && agl != null && agl < 2500 && spd < 200 && descendScore > 0.2)
-      arrivingScore = Math.max(arrivingScore, 0.80);
+    // Tier 1: practically on final — close, low, slow
+    if (f.dist <= 3 && agl <= 2500 && spd <= 200) {
+      return 'ARRIVING';
+    }
+    // Tier 2: short final extended — close, very low, descending
+    if (f.dist <= 6 && agl <= 1500 && vs < -100) {
+      return 'ARRIVING';
+    }
   }
 
-  // ── 11. DEPARTING score ─────────────────────────────────────────────────
-  let departingScore = 0;
-  if (recentlyGrounded && agl != null && agl < 8000 && f.dist < 20) {
-    departingScore = 0.95;
-  }
-  if (origHere && climbScore > 0.3 && f.dist < 30) {
-    departingScore = Math.max(departingScore, 0.9);
-  }
-  // Geometric: weighted-average not product
-  // climbing (40%) + heading-away (25%) + low (20%) + close (15%)
-  const geomDepart = (climbScore * 0.40) + (awayScore * 0.25)
-                   + (lowScore * 0.20) + (closeScore * 0.15);
-  departingScore = Math.max(departingScore, geomDepart);
-
-  // ── 12. PATTERN score ───────────────────────────────────────────────────
-  const slowScore = rampDown(spd, 100, 200);
-  let patternScore = 0;
-  if (f.dist < 6 && !destElsewhere) {
-    // Weighted: low (40%) + slow (30%) + level (30%)
-    patternScore = (veryLowScore * 0.40) + (slowScore * 0.30) + (levelScore * 0.30);
+  // ── 9. PATTERN — close & low & slow & roughly level
+  //       Inside 4 nm, under 2000 AGL, slow, not aggressively climbing or descending.
+  if (!destElsewhere && f.dist <= 4 && agl <= 2000 && spd <= 150 && Math.abs(vs) < 800) {
+    return 'PATTERN';
   }
 
-  // ── 13. Hysteresis — flight phases last minutes, lock the previous
-  //         classification with a stronger 1.5× boost when consistent
-  if (prev === 'ARRIVING'  && descendScore > 0.3 && departScore < 0.5) arrivingScore  *= 1.5;
-  if (prev === 'DEPARTING' && climbScore   > 0.3 && closingScore < 0.5) departingScore *= 1.5;
-  if (prev === 'PATTERN'   && f.dist < 8) patternScore *= 1.5;
-
-  // ── 14. Decision: highest score above confidence threshold wins ─────────
-  const CONF = 0.35; // require at least this much confidence to leave OVERFLY
-  const scores = [
-    { name: 'ARRIVING',  score: arrivingScore  },
-    { name: 'DEPARTING', score: departingScore },
-    { name: 'PATTERN',   score: patternScore   },
-  ].sort((a, b) => b.score - a.score);
-
-  if (scores[0].score >= CONF) return scores[0].name;
+  // ── 10. Default — anything else inside our local airspace is overflying low.
+  //        Could be a helicopter transiting, GA cruising at pattern altitude
+  //        between airports, etc. We do NOT claim them as ours.
   return 'OVERFLY';
 }
 
 const STATUS_CLS = { ARRIVING:'ARR', DEPARTING:'DEP', PATTERN:'PAT', OVERFLY:'OVR', GROUND:'GND', TAXIING:'TXI' };
 const STATUS_ORD = { ARRIVING:0,    DEPARTING:1,    PATTERN:2,    TAXIING:3,    GROUND:4,     OVERFLY:5 };
+
 
 // ── CLOCK ─────────────────────────────────────────────────────────────────
 function tickClock() {

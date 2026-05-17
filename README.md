@@ -17,7 +17,7 @@ Designed to live on a wall-mounted TV with a Fire TV stick. Looks great in lands
 
 🌤️ **Live METAR weather** — wind, visibility, sky conditions, temperature, altimeter, and flight rules color-coded for VFR / MVFR / IFR / LIFR
 
-🧭 **Smart flight phase detection** — fuzzy-logic algorithm inspired by [Junzi Sun's TU Delft research](https://github.com/junzis/flight-data-processor) classifies each aircraft as `ARRIVING`, `DEPARTING`, `PATTERN`, `OVERFLY`, `TAXIING`, or `GROUND`
+🧭 **Conservative flight phase detection** — inspired by [Fala et al.'s peer-reviewed work](https://journals.vilniustech.lt/index.php/Aviation/article/view/18025) on ADS-B airport operation counts, classifies each aircraft as `ARRIVING`, `DEPARTING`, `PATTERN`, `OVERFLY`, `TAXIING`, or `GROUND`
 
 🗺️ **Live radar map** with rotating sweep, distance rings (5/10/20 nm), aircraft headed-arrow icons, and **color-coded flight trails** showing each aircraft's recent path
 
@@ -113,19 +113,22 @@ If your TV/Fire TV keeps going to sleep, click the **📺 Keep Awake** button in
 
 ## 🧠 How the Status Logic Works
 
-Each aircraft maintains a 10-minute rolling history of position, altitude, speed, heading, and ground state. The algorithm:
+The algorithm is **deliberately conservative** — heavily inspired by [Fala, Falas & Falas (Aviation 2022)](https://journals.vilniustech.lt/index.php/Aviation/article/view/18025), a peer-reviewed paper on automatic airport operation counts from crowd-sourced ADS-B data.
 
-1. **Records every sample** with timestamp, lat/lon, altitude, vertical rate, speed, heading, distance, and on-ground flag
-2. **Smooths trends** via linear regression on a 90-second window — so banking turns and momentary noise don't flip the classification
-3. **Computes fuzzy scores** (0–1) for each piece of evidence: descending, climbing, closing distance, on glide-slope, low AGL, close, heading toward/away
-4. **Combines via weighted average** for each status (ARRIVING / DEPARTING / PATTERN), not pure multiplication — so moderate evidence accumulates rather than collapsing to zero
-5. **Applies hysteresis** — once classified, the status persists with a 1.5× boost while still consistent, preventing flicker
-6. **Decision** — highest-scoring status above a 0.35 confidence threshold wins; otherwise OVERFLY
+**Core principle:** an aircraft is only classified as arriving / departing / pattern if its **current geometry firmly places it at this specific airport**. There is no speculation from cruise behavior. A 737 at 32,000 ft is *always* OVERFLY, regardless of which direction it happens to be heading.
 
-Critical adaptations for accuracy:
-- **AGL not MSL** — uses airport elevation (e.g., KSEZ at 4,827 ft) so a 737 at 8,000 ft MSL there is correctly seen as 3,173 ft AGL, on a real approach slope
-- **Glide-slope angle** — `atan2(AGL, distance)` in degrees, with a trapezoid that peaks at 1.5°–5° (real approaches) and rejects flat overflies cleanly
-- **On-ground transition** is the strongest departure signal — if we observed it on the ground recently, that's a takeoff
+The classifier uses **hard geometric rules**, in order:
+
+1. **`GROUND`** / **`TAXIING`** — trust the ADS-B `on_ground` flag (≤5 kt = GROUND, otherwise TAXIING)
+2. **Hard altitude ceiling** — anything above **6,000 ft AGL above airport elevation** is OVERFLY, full stop. This is the safety belt that prevents misclassifying high cruisers.
+3. **Hard distance ceiling** — anything beyond 10 nm is OVERFLY (too many other nearby airports to reliably claim it)
+4. **Route cache check** — if we know the destination and it's not us, never classify as ARRIVING
+5. **`DEPARTING`** — *only* if we directly observed this aircraft on the ground here in the last 5 minutes
+6. **`ARRIVING`** — close + low + slow on final (≤3 nm AND ≤2,500 ft AGL AND ≤200 kt), or short final (≤6 nm AND ≤1,500 ft AGL AND descending)
+7. **`PATTERN`** — close + low + slow + level (≤4 nm AND ≤2,000 ft AGL AND ≤150 kt AND |vs|<800 fpm)
+8. **`OVERFLY`** — everything else
+
+Critical foundation: **AGL not MSL.** Uses airport elevation (e.g., KSEZ at 4,827 ft) so a plane at 7,000 ft over Sedona is correctly seen as 2,173 ft above the field, not "high cruise."
 
 ---
 
