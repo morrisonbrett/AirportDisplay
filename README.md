@@ -13,7 +13,7 @@ Designed to live on a wall-mounted TV with a Fire TV stick. Looks great in lands
 
 ## ✨ What It Does
 
-🛬 **Live aircraft tracking** — every plane within a configurable radius (default 30 nm), updating every 30 seconds from the community ADS-B networks [adsb.lol](https://adsb.lol) and [adsb.fi](https://adsb.fi), merged into one picture
+🛬 **Live aircraft tracking** — every plane within a configurable radius (default 30 nm), updating every 30 seconds from the community ADS-B network [adsb.fi](https://adsb.fi), merged with [adsb.lol](https://adsb.lol) once you add its free feeder key
 
 🌤️ **Live METAR weather** — wind, visibility, sky conditions, temperature, altimeter, and flight rules color-coded for VFR / MVFR / IFR / LIFR
 
@@ -97,7 +97,7 @@ There's an ICAO input in the top-right of the header. Type any 3–4 letter code
 
 Until August 2026 this page read aircraft straight from airplanes.live. That free API was then closed to everyone except people who run a receiver for them. The remaining free community feeds — [adsb.lol](https://adsb.lol) and [adsb.fi](https://adsb.fi) — do not send the CORS headers a browser needs, so **a web page cannot read them directly**, from any host. Something has to fetch them server-side.
 
-`api/feed.js` is that something: under 300 lines, no dependencies, no API keys. It asks both feeds at once, keeps the freshest position for each aircraft, fills gaps from the other feed, and hands the page one clean answer. It also relays METAR and airport lookups from aviationweather.gov, which has the same CORS limitation.
+`api/feed.js` is that something: about 300 lines, no dependencies, and no key needed to get going. It asks adsb.fi on every poll and hands the page one clean answer. With an adsb.lol key it asks both feeds at once, keeps the freshest position for each aircraft and fills gaps from the other feed (see [adsb.lol key](#adsblol-key-optional)). It also relays METAR and airport lookups from aviationweather.gov, which has the same CORS limitation.
 
 ### Set it up on Vercel (free, about two minutes)
 
@@ -129,16 +129,27 @@ Then open `http://localhost:8080/?icao=KSEZ`. It serves the page and the same re
 
 These feeds are run by volunteers and funded by donations. The relay is built to be light on them:
 
-- one request per feed per poll, and the page polls every 30 seconds
-- answers are cached for 10 seconds at the CDN, so several screens share one upstream request
-- a feed that answers "slow down" (429) or "no" (403) is left alone for a while instead of being retried
+- the page polls every 30 seconds, and each poll is one request to adsb.fi
+- adsb.lol allows only 500 requests a day per address without a key — one screen makes 2,880 — so without a key it is held in reserve and asked only when adsb.fi fails
+- answers are cached for 12 seconds at the CDN, so however many screens are running there is at most one upstream request per 12 seconds (7,200 a day, exactly adsb.lol's feeder allowance)
+- a feed that answers "slow down" (429) or "no" (403) is left alone for as long as it asks — up to a day when a daily quota is used up — instead of being retried
 - every request identifies itself with a `User-Agent` naming this project — **if you fork it, change `USER_AGENT` in `api/feed.js` to your own repo or e-mail**
 - both feeds are credited, with links, in the page footer (their terms require it: adsb.lol data is ODbL; adsb.fi is for personal, non-commercial use)
 - route lookups are made only for real flight numbers; a callsign that is just a tail number (`N770CC`) has no scheduled route, and the database's stale guesses for those were wrong
 
 One screen running around the clock makes roughly 90,000 relay requests a month — well inside Vercel's free Hobby allowance.
 
-The best way to say thanks, and to improve what this display can see near your own airport, is to [feed them](https://adsb.lol) with a small receiver (an RTL-SDR dongle and a Raspberry Pi).
+The best way to say thanks, and to improve what this display can see near your own airport, is to feed them from a small receiver (an RTL-SDR dongle and a Raspberry Pi). A receiver that already feeds another network can feed these as well, without disturbing its existing setup.
+
+### adsb.lol key (optional)
+
+adsb.lol's [published limits](https://www.adsb.lol/docs/open-data/api): 500 requests a day per address with no key, 7,200 a day with a **feeder key**, which is free to anyone whose receiver feeds their network — anywhere in the world, it does not have to be near the airport you watch.
+
+1. Add adsb.lol to your receiver: [Sharing your data](https://www.adsb.lol/docs/get-started/introduction).
+2. Collect your key at [adsb.lol/mmb](https://www.adsb.lol/mmb).
+3. In Vercel open your project → **Settings → Environment Variables**, add `ADSBLOL_API_KEY` with the key as its value, save, and **redeploy** when prompted.
+
+From then on every poll asks both networks and merges them, and the footer reads "adsb.lol + adsb.fi". The key stays on the server; it is never sent to the browser. Running locally: `ADSBLOL_API_KEY=your-key node local-server.js`.
 
 ### Who may use your relay
 
@@ -155,7 +166,8 @@ The screen tells you which piece is failing:
 | **Relay refused this page**        | The page's host is not in `ALLOWED_HOSTS`                                     | Add it and redeploy                                               |
 | **Relay unreachable**              | No network path to the relay                                                  | Check the internet connection on the TV                           |
 | **Live feed error** … `HTTP 401`   | You opened a protected per-deployment address                                 | Use the short production address under **Domains**                |
-| Footer shows e.g. `adsb.lol 429`   | One feed is rate-limiting the relay; the other is still supplying aircraft    | Nothing                                                           |
+| Footer shows e.g. `adsb.fi 429`    | One feed is rate-limiting the relay; the other is still supplying aircraft    | Nothing                                                           |
+| Footer shows only `adsb.fi`        | Normal without an adsb.lol key                                                | Optional: add `ADSBLOL_API_KEY` — see adsb.lol key                |
 | Map stamped **API KEY REQUIRED**   | `CARTO_KEY` is set but CARTO rejects it (mistyped, deleted, wrong site)       | Fix or remove `CARTO_KEY`, then redeploy — see Map Background     |
 
 ---
@@ -231,14 +243,14 @@ Two files do the work, and neither needs a build step or a dependency:
 | `local-server.js` | on your machine | Optional: serves both from one computer                             |
 | `package.json`    | —               | Only tells Node the relay is an ES module                           |
 
-Nothing has to be configured. One setting is optional: the `CARTO_KEY` environment variable described under [Map Background](#-map-background).
+Nothing has to be configured. Two settings are optional, both environment variables where the relay runs: `ADSBLOL_API_KEY` ([adsb.lol key](#adsblol-key-optional)) and `CARTO_KEY` ([Map Background](#-map-background)).
 
 ### Data sources
 
 | Source                                                  | What it provides                            | Reached                |
 | ------------------------------------------------------- | ------------------------------------------- | ---------------------- |
-| 🛩️ [adsb.lol](https://adsb.lol)                         | Live ADS-B aircraft positions (ODbL)        | via the relay          |
 | 🛩️ [adsb.fi](https://adsb.fi)                           | Live ADS-B aircraft positions               | via the relay          |
+| 🛩️ [adsb.lol](https://adsb.lol)                         | Same (ODbL): backup, or merged with a key   | via the relay          |
 | 🌦️ [VATSIM METAR](https://metar.vatsim.net)             | Airport weather                             | directly               |
 | 🌦️ [aviationweather.gov](https://aviationweather.gov)   | Weather fallback + airport lookup           | via the relay          |
 | 🛬 [adsbdb.com](https://adsbdb.com)                     | Filed flight plan routes (commercial)       | directly               |

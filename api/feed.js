@@ -4,8 +4,15 @@
 //   The page used to read aircraft straight from airplanes.live. That free API was
 //   closed to non-feeders in August 2026. The remaining free community feeds
 //   (adsb.lol, adsb.fi) do not send CORS headers, so a browser refuses to hand
-//   their answers to a web page. This relay asks them server-side, merges the two
-//   answers, and returns one JSON document the page is allowed to read.
+//   their answers to a web page. This relay asks them server-side and returns one
+//   JSON document the page is allowed to read.
+//
+// WHICH FEED IS ASKED
+//   • No adsb.lol key (the default): adsb.fi on every poll. adsb.lol allows only 500
+//     requests a day per address without a key — a display polling every 30 seconds
+//     makes 2,880 — so it is held in reserve and asked only when adsb.fi fails.
+//   • ADSBLOL_API_KEY set: both feeds on every poll, merged into one picture. A free
+//     feeder key (7,200 requests a day) comes with feeding adsb.lol from any receiver.
 //
 // WHERE IT RUNS
 //   • Vercel (free Hobby plan): any file in /api becomes a function automatically.
@@ -20,8 +27,11 @@
 //   /api/feed?airport=KXYZ                    position / name / elevation of an airport
 //   /api/feed?config=1                        optional page settings (the CARTO map key)
 //
-// No dependencies, and nothing to configure for the default setup. One optional
-// environment variable: CARTO_KEY, a free key that restores CARTO's dark map tiles.
+// No dependencies, and nothing to configure for the default setup. Optional
+// environment variables:
+//   ADSBLOL_API_KEY   adsb.lol key (https://www.adsb.lol/mmb) — adds adsb.lol to every poll
+//   CARTO_KEY         CARTO key (https://carto.com/basemaps/apikey) — restores CARTO's dark map
+//   ALLOWED_HOSTS     extra page hosts allowed to use this relay, comma-separated
 
 // The feeds ask every client to identify itself. adsb.lol answers 403 to generic
 // User-Agents. If you fork this project, point this at YOUR repo or e-mail.
@@ -36,22 +46,29 @@ const ALLOWED_HOSTS = ['morrisonbrett.github.io']
   .map(h => h.trim().toLowerCase())
   .filter(Boolean);
 
-const FEEDS = [
-  {
-    name: 'adsb.lol',
-    home: 'https://adsb.lol',
-    url: (lat, lon, r) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${r}`,
-  },
-  {
-    name: 'adsb.fi',
-    home: 'https://adsb.fi',
-    url: (lat, lon, r) => `https://opendata.adsb.fi/api/v3/lat/${lat}/lon/${lon}/dist/${r}`,
-  },
-];
+const ADSB_FI = {
+  name: 'adsb.fi',
+  home: 'https://adsb.fi',
+  url: (lat, lon, r) => `https://opendata.adsb.fi/api/v3/lat/${lat}/lon/${lon}/dist/${r}`,
+};
+const ADSB_LOL = {
+  name: 'adsb.lol',
+  home: 'https://adsb.lol',
+  url: (lat, lon, r) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${r}`,
+};
 
-const FEED_TIMEOUT_MS = 6000;   // per feed; both are asked at the same time
+// adsb.lol's published limits (https://www.adsb.lol/docs/open-data/api): 500 requests a
+// day per address with no key; 7,200 a day with a feeder key, sent as "x-api-key".
+function adsbLolKey() {
+  const key = String(process.env.ADSBLOL_API_KEY || '').trim();
+  return /^[\w.\-]{8,200}$/.test(key) ? key : null;
+}
+
+const FEED_TIMEOUT_MS = 4000;   // per feed. Keyless, the two are asked one after the other, so 2 × this must stay under the page's 10 s
 const MAX_RADIUS_NM   = 250;    // both feeds cap the radius at 250 nm
-const FEED_CACHE_S    = 10;     // CDN answers repeat requests for this long (many screens → one upstream call)
+// CDN answers repeat requests for this long, so however many screens are running there is
+// at most one upstream call per 12 s — 7,200 a day, exactly adsb.lol's feeder allowance.
+const FEED_CACHE_S    = 12;
 const METAR_CACHE_S   = 180;
 const AIRPORT_CACHE_S = 86400;
 
@@ -62,10 +79,19 @@ const KEEP = [
   'baro_rate', 'geom_rate', 'squawk', 'category', 'lat', 'lon', 'seen', 'seen_pos',
 ];
 
-// A feed that says "slow down" (429) or "no" (403) is left alone for a while.
-// adsb.fi counts refused requests toward a temporary ban, so hammering makes it worse.
+// A feed that says "slow down" (429) or "no" (401/403) is left alone for as long as it asks.
+// adsb.fi counts refused requests toward a temporary ban, and adsb.lol's daily quota only
+// comes back at 00:00 UTC, so asking again early achieves nothing and looks like abuse.
 // Module scope survives between requests while the function instance stays warm.
 const cooldown = new Map();   // feed name → { until: epoch ms, status }
+
+// Retry-After is either a number of seconds or an HTTP date.
+function retryAfterSeconds(resp, fallback) {
+  const v = String(resp.headers.get('retry-after') || '').trim();
+  if (/^\d+$/.test(v)) return parseInt(v, 10);
+  const when = Date.parse(v);
+  return Number.isFinite(when) ? Math.ceil((when - Date.now()) / 1000) : fallback;
+}
 
 const isNum = v => typeof v === 'number' && Number.isFinite(v);
 
@@ -88,15 +114,15 @@ function originAllowed(req) {
   return ALLOWED_HOSTS.includes(name);
 }
 
-async function upstream(url) {
+async function upstream(url, extraHeaders) {
   return fetch(url, {
-    headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/json' },
+    headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/json', ...(extraHeaders || {}) },
     signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
   });
 }
 
 // Ask one feed. Never throws: always resolves to a report, with `ac` on success.
-async function askFeed(feed, lat, lon, r) {
+async function askFeed(feed, lat, lon, r, extraHeaders) {
   const started = Date.now();
   const report = { name: feed.name, home: feed.home, ok: false, status: 0, count: 0, ms: 0 };
 
@@ -108,12 +134,12 @@ async function askFeed(feed, lat, lon, r) {
   }
 
   try {
-    const resp = await upstream(feed.url(lat, lon, r));
+    const resp = await upstream(feed.url(lat, lon, r), extraHeaders);
     report.status = resp.status;
     if (!resp.ok) {
       if (resp.status === 429) {
-        const ra = parseInt(resp.headers.get('retry-after') || '', 10);
-        const wait = Math.min(300, Math.max(15, Number.isFinite(ra) ? ra : 60));
+        // Honour the wait in full (a day at most): an exhausted daily quota says "come back at midnight UTC"
+        const wait = Math.min(86400, Math.max(15, retryAfterSeconds(resp, 60)));
         cooldown.set(feed.name, { until: started + wait * 1000, status: 429 });
       } else if (resp.status === 401 || resp.status === 403) {
         cooldown.set(feed.name, { until: started + 300000, status: resp.status });
@@ -198,17 +224,26 @@ async function handleAircraft(res, q) {
   const la = lat.toFixed(3), lo = lon.toFixed(3);
   const r  = Math.min(MAX_RADIUS_NM, Math.max(1, Math.round(rad)));
 
-  const reports = await Promise.all(FEEDS.map(f => askFeed(f, la, lo, r)));
+  const key = adsbLolKey();
+  let reports;
+  if (key) {
+    // Keyed: both feeds on every poll, merged below.
+    reports = await Promise.all([askFeed(ADSB_LOL, la, lo, r, { 'x-api-key': key }), askFeed(ADSB_FI, la, lo, r)]);
+  } else {
+    // Keyless: adsb.fi carries the display. adsb.lol's 500-a-day allowance is spent only when adsb.fi fails.
+    const fi = await askFeed(ADSB_FI, la, lo, r);
+    reports = fi.ok ? [fi] : [fi, await askFeed(ADSB_LOL, la, lo, r)];
+  }
   const good    = reports.filter(x => x.ok);
   const sources = reports.map(({ ac, ...rest }) => rest);
 
   if (!good.length) {
     const limited = reports.every(x => x.status === 429);
-    return reply(res, limited ? 503 : 502, { error: 'no aircraft feed answered', sources });
+    return reply(res, limited ? 503 : 502, { error: 'no aircraft feed answered', sources, adsbLolKey: !!key });
   }
 
   const ac = mergeFeeds(good.map(x => x.ac));
-  return reply(res, 200, { now: Date.now(), total: ac.length, ac, sources },
+  return reply(res, 200, { now: Date.now(), total: ac.length, ac, sources, adsbLolKey: !!key },
     `public, max-age=0, s-maxage=${FEED_CACHE_S}`);
 }
 

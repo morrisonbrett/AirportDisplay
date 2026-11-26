@@ -3,6 +3,7 @@
 //   node local-server.js            → http://localhost:8080/?icao=KSEZ
 //   PORT=9000 node local-server.js  → another port
 //   CARTO_KEY=your-key node local-server.js  → CARTO's dark map instead of darkened OpenStreetMap
+//   ADSBLOL_API_KEY=your-key node local-server.js  → adsb.lol merged in on every poll
 //
 // It serves index.html and answers /api/feed with the same code Vercel runs
 // (api/feed.js). Requests leave from your own internet connection, which the
