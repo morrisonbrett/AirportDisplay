@@ -380,7 +380,7 @@
 </main>
 
 <footer>
-  <div class="fi">Source · <span id="f-src"><a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a> + <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a></span></div>
+  <div class="fi">Source · <span id="f-src"><a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a></span></div>
   <div class="fi">Radius · <span id="f-radius">—</span> nm</div>
   <div class="fi"><span id="f-count">—</span> aircraft</div>
   <div class="fi-sp"></div>
@@ -408,8 +408,8 @@ const CFG = {
 // ── LIVE DATA RELAY ───────────────────────────────────────────────────────
 // A web page cannot read the free ADS-B feeds directly: they send no CORS
 // headers, so the browser blocks the answer. This page therefore asks a small
-// relay — api/feed.js in this repo — which fetches adsb.lol + adsb.fi
-// server-side and returns one merged answer. (airplanes.live, the original
+// relay — api/feed.js in this repo — which fetches them (adsb.fi, plus
+// adsb.lol when it has a key) server-side. (airplanes.live, the original
 // source, closed its free API in August 2026.)
 //
 // Where the page looks for the relay, in order:
@@ -1077,7 +1077,7 @@ function refreshWeather() {
   fetchMETAR(CFG.icao).then(ok => { if (ok) metarNextAt = Date.now() + 300000; });
 }
 
-// ── AIRCRAFT FETCH (adsb.lol + adsb.fi, merged by the relay) ─────────────
+// ── AIRCRAFT FETCH (adsb.fi, plus adsb.lol with a key — via the relay) ───
 let feedSources = [];   // per-feed report from the last good answer — drives the footer credit
 
 // One raw feed record → the shape the rest of the page uses. Null = unusable.
