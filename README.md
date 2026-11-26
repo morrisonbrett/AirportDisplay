@@ -6,14 +6,14 @@ Designed to live on a wall-mounted TV with a Fire TV stick. Looks great in lands
 
 ![License](https://img.shields.io/badge/license-MIT-00c8f0?style=flat-square)
 ![Status](https://img.shields.io/badge/status-live-00e87a?style=flat-square)
-![Hosted on](https://img.shields.io/badge/hosted-GitHub_Pages-9060f0?style=flat-square)
-![Single file](https://img.shields.io/badge/single_HTML_file-no_build-f0a000?style=flat-square)
+![Data](https://img.shields.io/badge/data-adsb.lol_%2B_adsb.fi-9060f0?style=flat-square)
+![No build](https://img.shields.io/badge/one_page_%2B_one_relay-no_build-f0a000?style=flat-square)
 
 ---
 
 ## ✨ What It Does
 
-🛬 **Live aircraft tracking** — every plane within a configurable radius (default 30 nm), updating every 30 seconds via [airplanes.live](https://airplanes.live)
+🛬 **Live aircraft tracking** — every plane within a configurable radius (default 30 nm), updating every 30 seconds from the community ADS-B networks [adsb.lol](https://adsb.lol) and [adsb.fi](https://adsb.fi), merged into one picture
 
 🌤️ **Live METAR weather** — wind, visibility, sky conditions, temperature, altimeter, and flight rules color-coded for VFR / MVFR / IFR / LIFR
 
@@ -30,6 +30,8 @@ Designed to live on a wall-mounted TV with a Fire TV stick. Looks great in lands
 🕒 **Dual clocks** — local airport time (with auto-detected timezone) and Zulu (UTC), monospaced and stable
 
 📱 **Mobile-friendly** — full responsive layout for phones in portrait, with the map hidden and the flight table optimized for small screens
+
+🚦 **Honest when data stops** — if the feeds go quiet the screen says so in plain words, keeps the last picture for two minutes at most, and recovers by itself
 
 ---
 
@@ -55,36 +57,104 @@ The aesthetic is meant to evoke a real radar console — deep navy-black backgro
 
 ## 🚀 Quick Start
 
-### Just want to use it?
-
-Open the live deployment with any ICAO code:
+The display is two pieces: the page (`index.html`) and a tiny **relay** (`api/feed.js`) that fetches the aircraft data for it. The relay is required — see [📡 Live Data Relay](#-live-data-relay) for the two-minute setup. Once it is running, open the page with any ICAO code:
 
 ```
-https://morrisonbrett.github.io/AirportDisplay/?icao=KSEZ
+https://YOUR-PROJECT.vercel.app/?icao=KSEZ
 ```
 
-Some examples:
-- 🌵 [`KSEZ`](https://morrisonbrett.github.io/AirportDisplay/?icao=KSEZ) — Sedona Airport
-- 🌴 [`KCMA`](https://morrisonbrett.github.io/AirportDisplay/?icao=KCMA) — Camarillo Airport
-- 🏔️ [`KASE`](https://morrisonbrett.github.io/AirportDisplay/?icao=KASE) — Aspen
-- 🌊 [`KSAN`](https://morrisonbrett.github.io/AirportDisplay/?icao=KSAN) — San Diego
-- 🌆 [`KLAX`](https://morrisonbrett.github.io/AirportDisplay/?icao=KLAX) — Los Angeles
+Some examples (add them after your own address):
+- 🌵 `?icao=KSEZ` — Sedona Airport
+- 🌴 `?icao=KCMA` — Camarillo Airport
+- 🏔️ `?icao=KASE` — Aspen
+- 🌊 `?icao=KSAN` — San Diego
+- 🌆 `?icao=KLAX` — Los Angeles
+
+The GitHub Pages copy at `https://morrisonbrett.github.io/AirportDisplay/` works too, once it knows where the relay lives: set `RELAY_URL` near the top of the script in `index.html`, or add `&relay=https://YOUR-PROJECT.vercel.app` to the address.
 
 ### URL Parameters
 
 | Param    | Default | Description                                              |
 | -------- | ------- | -------------------------------------------------------- |
 | `icao`   | `KSEZ`  | 4-letter ICAO airport code                               |
-| `radius` | `30`    | Search radius in nautical miles                          |
-| `lat`    | —       | Override latitude (for airports not in the built-in DB)  |
+| `radius` | `30`    | Search radius in nautical miles (max 250)                |
+| `lat`    | —       | Override latitude (for airports the lookup cannot find)  |
 | `lon`    | —       | Override longitude                                       |
 | `name`   | —       | Override display name                                    |
+| `relay`  | —       | Address of the relay, when the page is hosted elsewhere  |
 
 Example with custom airport: `?icao=K9X9&lat=34.123&lon=-111.456&name=My+Custom+Field`
 
 ### Switch airports without editing the URL
 
 There's an ICAO input in the top-right of the header. Type any 3–4 letter code and press **Enter** or tap **Go**. D-pad navigation works too, so you can change airports from a Fire TV remote.
+
+---
+
+## 📡 Live Data Relay
+
+### Why there is a relay
+
+Until August 2026 this page read aircraft straight from airplanes.live. That free API was then closed to everyone except people who run a receiver for them. The remaining free community feeds — [adsb.lol](https://adsb.lol) and [adsb.fi](https://adsb.fi) — do not send the CORS headers a browser needs, so **a web page cannot read them directly**, from any host. Something has to fetch them server-side.
+
+`api/feed.js` is that something: under 300 lines, no dependencies, no API keys. It asks both feeds at once, keeps the freshest position for each aircraft, fills gaps from the other feed, and hands the page one clean answer. It also relays METAR and airport lookups from aviationweather.gov, which has the same CORS limitation.
+
+### Set it up on Vercel (free, about two minutes)
+
+1. Sign in at [vercel.com](https://vercel.com) with your GitHub account.
+2. **Add New → Project**, import this repository, leave every setting as it is (Framework Preset: *Other*), and press **Deploy**.
+3. Open `https://YOUR-PROJECT.vercel.app/?icao=KSEZ` — use the short address listed under **Domains**, not the long per-deployment one.
+
+That's all. Vercel turns any file in `/api` into a function by itself, serves `index.html` from the same address, and redeploys on every push — the same zero-touch cycle as GitHub Pages.
+
+To check the relay on its own, open:
+
+```
+https://YOUR-PROJECT.vercel.app/api/feed?lat=34.849&lon=-111.790&r=30
+```
+
+You should see JSON with `"ok": true` next to each feed under `sources`.
+
+> **Not a Cloudflare Worker, and not Vercel's Edge runtime.** Both feeds refuse requests that arrive from Cloudflare's network (403 / 429), and Vercel's Edge runtime runs there too. The default Node.js runtime — what you get without configuring anything — is the one that works.
+
+### Or run it on any computer (no account at all)
+
+```
+node local-server.js
+```
+
+Then open `http://localhost:8080/?icao=KSEZ`. It serves the page and the same relay code from your own internet connection. Other devices on your network can use `http://<that computer's IP>:8080/?icao=KSEZ` while it runs. Needs Node 18 or newer, nothing to install. This is also the fallback if a hosted relay ever gets rate-limited: home connections are not shared with thousands of other apps.
+
+### Being a good guest
+
+These feeds are run by volunteers and funded by donations. The relay is built to be light on them:
+
+- one request per feed per poll, and the page polls every 30 seconds
+- answers are cached for 10 seconds at the CDN, so several screens share one upstream request
+- a feed that answers "slow down" (429) or "no" (403) is left alone for a while instead of being retried
+- every request identifies itself with a `User-Agent` naming this project — **if you fork it, change `USER_AGENT` in `api/feed.js` to your own repo or e-mail**
+- both feeds are credited, with links, in the page footer (their terms require it: adsb.lol data is ODbL; adsb.fi is for personal, non-commercial use)
+
+One screen running around the clock makes roughly 90,000 relay requests a month — well inside Vercel's free Hobby allowance.
+
+The best way to say thanks, and to improve what this display can see near your own airport, is to [feed them](https://adsb.lol) with a small receiver (an RTL-SDR dongle and a Raspberry Pi).
+
+### Who may use your relay
+
+A page served by the relay's own address, a page opened as a local file, and `localhost` are always allowed. Pages on other hosts must be listed: add the host to `ALLOWED_HOSTS` at the top of `api/feed.js` (or set an `ALLOWED_HOSTS` environment variable in Vercel, comma-separated). This only keeps other sites from spending your quota; the data itself is public.
+
+### When something is wrong
+
+The screen tells you which piece is failing:
+
+| On screen                          | What it means                                                                 | What to do                                                        |
+| ---------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Live feed not connected**        | The page found no relay                                                       | Open the page from the relay's address, or set `RELAY_URL` / `?relay=` |
+| **Aircraft feeds not answering**   | The relay works; the feeds refused or timed out (the status of each is shown) | Usually clears by itself — it retries every 30 seconds            |
+| **Relay refused this page**        | The page's host is not in `ALLOWED_HOSTS`                                     | Add it and redeploy                                               |
+| **Relay unreachable**              | No network path to the relay                                                  | Check the internet connection on the TV                           |
+| **Live feed error** … `HTTP 401`   | You opened a protected per-deployment address                                 | Use the short production address under **Domains**                |
+| Footer shows e.g. `adsb.lol 429`   | One feed is rate-limiting the relay; the other is still supplying aircraft    | Nothing                                                           |
 
 ---
 
@@ -134,51 +204,31 @@ Critical foundation: **AGL not MSL.** Uses airport elevation (e.g., KSEZ at 4,82
 
 ## 🔧 Architecture
 
-A single self-contained `index.html` file. No build step, no dependencies to install, no backend (almost). You can open it locally by double-clicking and it works offline-ish (still needs the data APIs).
+Two files do the work, and neither needs a build step or a dependency:
+
+| File              | Runs            | Job                                                                 |
+| ----------------- | --------------- | ------------------------------------------------------------------- |
+| `index.html`      | in the browser  | The whole display: layout, map, status logic, chimes                |
+| `api/feed.js`     | on the server   | The relay: fetches and merges the aircraft feeds, weather, airports |
+| `local-server.js` | on your machine | Optional: serves both from one computer                             |
+| `package.json`    | —               | Only tells Node the relay is an ES module                           |
 
 ### Data sources
 
-| Source                                                  | What it provides                            |
-| ------------------------------------------------------- | ------------------------------------------- |
-| 🛩️ [airplanes.live](https://airplanes.live)             | Live ADS-B aircraft positions and basics    |
-| 🌦️ [VATSIM METAR](https://metar.vatsim.net)             | Airport weather (CORS-friendly)             |
-| 🌦️ [aviationweather.gov](https://aviationweather.gov)   | Weather + airport DB fallback               |
-| 🛬 [adsbdb.com](https://adsbdb.com)                     | Filed flight plan routes (commercial)       |
-| 🗺️ [CARTO Dark](https://carto.com)                      | Map tiles (via Leaflet)                     |
-
-### Optional Cloudflare Worker proxy
-
-A simple Cloudflare Worker (free tier) is included for cross-origin proxying when needed. It enforces a domain allowlist for the upstream APIs:
-
-```javascript
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
-    const target = url.searchParams.get('url');
-    const cors = {
-      'Access-Control-Allow-Origin':  '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    };
-    if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
-    if (!target) return new Response('Missing url', { status: 400, headers: cors });
-    const allowed = ['https://hexdb.io/', 'https://api.adsbdb.com/', 'https://opensky-network.org/', 'https://aviationweather.gov/'];
-    if (!allowed.some(p => target.startsWith(p))) return new Response('Not allowed', { status: 403, headers: cors });
-    const r = await fetch(target);
-    const body = await r.text();
-    return new Response(body, {
-      status: r.status,
-      headers: { ...cors, 'Content-Type': r.headers.get('Content-Type') || 'application/json' },
-    });
-  },
-};
-```
+| Source                                                  | What it provides                            | Reached                |
+| ------------------------------------------------------- | ------------------------------------------- | ---------------------- |
+| 🛩️ [adsb.lol](https://adsb.lol)                         | Live ADS-B aircraft positions (ODbL)        | via the relay          |
+| 🛩️ [adsb.fi](https://adsb.fi)                           | Live ADS-B aircraft positions               | via the relay          |
+| 🌦️ [VATSIM METAR](https://metar.vatsim.net)             | Airport weather                             | directly               |
+| 🌦️ [aviationweather.gov](https://aviationweather.gov)   | Weather fallback + airport lookup           | via the relay          |
+| 🛬 [adsbdb.com](https://adsbdb.com)                     | Filed flight plan routes (commercial)       | directly               |
+| 🗺️ [CARTO Dark](https://carto.com)                      | Map tiles (via Leaflet)                     | directly               |
 
 ---
 
 ## 🗺️ Built-in Airport Database
 
-Around 200 airports across the US (and a few in HI/AK) are pre-loaded with coordinates and elevations, including all major hubs and most regional/GA fields in the western states. For anything not in the list, the page falls back to the `aviationweather.gov` API, or you can specify lat/lon/name via URL parameters.
+Around 200 airports across the US (and a few in HI/AK) are pre-loaded with coordinates and elevations, including all major hubs and most regional/GA fields in the western states. For anything not in the list, the page asks the relay to look the airport up at `aviationweather.gov` (position, name and elevation), or you can specify lat/lon/name via URL parameters.
 
 ---
 

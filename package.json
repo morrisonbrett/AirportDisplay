@@ -1,0 +1,6 @@
+{
+  "name": "airport-display",
+  "private": true,
+  "type": "module",
+  "description": "Live airport traffic display for TVs: one static page plus the /api/feed relay"
+}

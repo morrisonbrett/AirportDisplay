@@ -181,6 +181,11 @@
     @keyframes ringp { 0%,100%{box-shadow:0 0 0 0 rgba(0,200,240,0)} 50%{box-shadow:0 0 0 12px rgba(0,200,240,.05)} }
     .e-lbl { font-family:var(--f-ui); font-size:clamp(11px,.9vw,16px); font-weight:600; color:var(--txt3); letter-spacing:.28em; text-transform:uppercase; }
     .e-sub { font-family:var(--f-data); font-size:clamp(8px,.7vw,12px); color:var(--txt3); opacity:.55; }
+    /* Feed problem: same panel, but large and readable from across a room */
+    .empty.err .e-ring { border-color:rgba(240,100,100,.35); animation:none; }
+    .empty.err .e-ring::after { border-color:rgba(240,100,100,.18); }
+    .empty.err .e-lbl { color:rgba(240,110,110,.95); font-size:clamp(13px,1.25vw,24px); }
+    .empty.err .e-sub { color:var(--txt2); opacity:1; font-size:clamp(11px,.95vw,18px); line-height:1.55; max-width:86%; text-align:center; white-space:pre-line; }
 
     /* ── MAP ── */
     .map-panel { flex:1; position:relative; background:#030508; }
@@ -205,6 +210,8 @@
     footer::before { content:''; position:absolute; top:0; left:0; right:0; height:1px; background:linear-gradient(90deg,transparent,var(--bd2),transparent); }
     .fi { font-family:var(--f-ui); font-size:clamp(7px,.62vw,11px); letter-spacing:.15em; text-transform:uppercase; color:var(--txt3); white-space:nowrap; }
     .fi span { color:var(--txt2); }
+    .fi a { color:inherit; text-decoration:none; }
+    .fi .src-off { opacity:.45; }
     .fi-err { color:rgba(240,100,100,.75); font-family:var(--f-data); font-size:clamp(7px,.62vw,11px); max-width:40vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .fi-sp { flex:1; }
     /* Audio arm button */
@@ -279,6 +286,7 @@
       .td-unit { font-size:8px; margin-left:1px; }
       .td-route-orig, .td-route-dest { font-size:10px; }
       .td-route-arr-inline { font-size:9px; }
+      .td-route-row  { flex-wrap:wrap; gap:0 3px; }   /* "KSEZ → KSEZ" wraps instead of running into the altitude */
       .td-route-city { display:none; }   /* drop city line on mobile */
       .badge   { font-size:9px; padding:3px 6px; letter-spacing:.08em; }
       .badge::before { width:4px; height:4px; }
@@ -355,8 +363,8 @@
     </div>
     <div class="empty" id="empty">
       <div class="e-ring"></div>
-      <div class="e-lbl">Scanning Airspace</div>
-      <div class="e-sub">No aircraft detected within range</div>
+      <div class="e-lbl" id="e-lbl">Scanning Airspace</div>
+      <div class="e-sub" id="e-sub">No aircraft detected within range</div>
     </div>
   </section>
 
@@ -368,7 +376,7 @@
 </main>
 
 <footer>
-  <div class="fi">Source · <span>airplanes.live</span></div>
+  <div class="fi">Source · <span id="f-src"><a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a> + <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a></span></div>
   <div class="fi">Radius · <span id="f-radius">—</span> nm</div>
   <div class="fi"><span id="f-count">—</span> aircraft</div>
   <div class="fi-sp"></div>
@@ -383,8 +391,8 @@
 // ── CONFIG ────────────────────────────────────────────────────────────────
 const QS = new URLSearchParams(location.search);
 const CFG = {
-  icao:     (QS.get('icao') || 'KSEZ').toUpperCase(),
-  radiusNm: parseInt(QS.get('radius') || '30'),
+  icao:     (QS.get('icao') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4) || 'KSEZ',
+  radiusNm: Math.min(250, Math.max(1, parseInt(QS.get('radius') || '30') || 30)),
   refresh:  30000,
   lat:  QS.get('lat')  ? parseFloat(QS.get('lat'))  : null,
   lon:  QS.get('lon')  ? parseFloat(QS.get('lon'))  : null,
@@ -392,6 +400,116 @@ const CFG = {
   tz:   null,
   elev: 0,    // airport elevation MSL (ft) — set during init
 };
+
+// ── LIVE DATA RELAY ───────────────────────────────────────────────────────
+// A web page cannot read the free ADS-B feeds directly: they send no CORS
+// headers, so the browser blocks the answer. This page therefore asks a small
+// relay — api/feed.js in this repo — which fetches adsb.lol + adsb.fi
+// server-side and returns one merged answer. (airplanes.live, the original
+// source, closed its free API in August 2026.)
+//
+// Where the page looks for the relay, in order:
+//   1. ?relay=https://your-relay-host        in the page URL
+//   2. RELAY_URL below
+//   3. /api/feed on the host that served this page — automatic when the page
+//      is opened from Vercel or from local-server.js
+const RELAY_URL = '';   // e.g. 'https://your-project.vercel.app'
+
+function relayEndpoint(v) {
+  if (!v) return null;
+  let s = String(v).trim();
+  if (!s) return null;
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  try {
+    const u = new URL(s);
+    let p = u.pathname.replace(/\/+$/, '');
+    if (!/\/api\/feed$/.test(p)) p += '/api/feed';
+    u.pathname = p; u.search = ''; u.hash = '';
+    return u.href;
+  } catch (e) { return null; }
+}
+
+const RELAYS = [];
+[QS.get('relay'), RELAY_URL, /^https?:$/.test(location.protocol) ? new URL('api/feed', location.href).href : null]
+  .forEach(v => { const u = relayEndpoint(v); if (u && !RELAYS.includes(u)) RELAYS.push(u); });
+
+const relaySkipUntil = new Map();   // address that turned out not to be a relay → when to look again
+let   relayGood      = null;        // last address that answered properly
+const RELAY_RECHECK_MS = 600000;
+
+// kind: 'norelay' | 'network' | 'origin' | 'feeds' | 'relay'
+function feedError(kind, message, extra) {
+  const e = new Error(message);
+  e.kind = kind;
+  Object.assign(e, extra || {});
+  return e;
+}
+
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+
+// GET one JSON answer from the relay. Tries each known address; throws a
+// feedError describing the most useful failure when none works.
+async function relayGet(params) {
+  const now = Date.now();
+  let order = RELAYS.filter(u => !(relaySkipUntil.get(u) > now));
+  if (relayGood && order.includes(relayGood)) order = [relayGood, ...order.filter(u => u !== relayGood)];
+  if (!order.length) throw feedError('norelay', 'no relay answered');
+
+  // When several addresses fail, report the most informative failure:
+  // a relay's own explanation beats "could not reach it" beats "nothing there".
+  const RANK = { origin: 3, feeds: 3, relay: 3, network: 2, norelay: 1 };
+  let problem = null;
+  const note = err => { if (!problem || RANK[err.kind] > RANK[problem.kind]) problem = err; };
+
+  for (const base of order) {
+    const host = new URL(base).host;
+    let r;
+    try {
+      r = await fetch(`${base}?${new URLSearchParams(params)}`, { signal: timeoutSignal(10000) });
+    } catch (e) {
+      console.warn('Relay unreachable:', base, e.message);
+      note(feedError('network', `could not reach ${host}`, { host }));
+      continue;
+    }
+    let body = null;
+    if (/json/i.test(r.headers.get('content-type') || '')) {
+      try { body = await r.json(); } catch (e) { /* not JSON after all */ }
+    }
+    if (!body || typeof body !== 'object') {
+      if (r.status === 404) {
+        // Nothing at this address is a relay — GitHub Pages answers 404 here.
+        // Don't ask it again every 30 seconds; look again in 10 minutes.
+        relaySkipUntil.set(base, now + RELAY_RECHECK_MS);
+        console.warn('No relay at', base);
+        note(feedError('norelay', `no relay at ${host}`, { host }));
+      } else {
+        // A relay host having a bad moment (gateway error page, sign-in wall). Ask again next time.
+        note(feedError('relay', `unexpected answer from ${host} (HTTP ${r.status})`, { host, httpStatus: r.status }));
+      }
+      continue;
+    }
+    if (r.ok) { relayGood = base; return body; }
+
+    const kind = (r.status === 403 && body.error === 'origin not allowed') ? 'origin'
+               : Array.isArray(body.sources) ? 'feeds'
+               : 'relay';
+    note(feedError(kind, String(body.error || `relay answered HTTP ${r.status}`),
+      { host, httpStatus: r.status, sources: body.sources }));
+  }
+  throw problem;
+}
+
+// Text from the outside world (feeds, route database, URL) must never be
+// trusted as HTML. Everything that reaches innerHTML goes through here.
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g,
+    c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
 
 // ── AIRPORT DATABASE ──────────────────────────────────────────────────────
 // Covers ~200 airports. For any not listed, falls back to aviationweather.gov API.
@@ -845,9 +963,11 @@ function tickClock() {
   // Local — HH:MM TZ
   if (CFG.tz) {
     const localStr = n.toLocaleTimeString('en-US', {timeZone:CFG.tz, hour:'2-digit', minute:'2-digit', hour12:false});
+    // Keep the id on the rebuilt label — without it the zone (e.g. "MST") was
+    // lost one second after load, when the next tick could no longer find it.
     const tzEl = document.getElementById('clock-local-tz');
     document.getElementById('clock-local').innerHTML =
-      `${localStr}<span class="clock-z"> ${tzEl ? tzEl.textContent : ''}</span>`;
+      `${localStr}<span class="clock-z" id="clock-local-tz"> ${tzEl ? esc(tzEl.textContent.trim()) : ''}</span>`;
   }
 }
 setInterval(tickClock, 1000); tickClock();
@@ -869,21 +989,19 @@ function goToIcao() {
 async function lookupAirport(icao) {
   // 1. Built-in DB
   if (AIRPORTS[icao]) return { ...AIRPORTS[icao], elev: ELEVATIONS[icao] || 0 };
-  // 2. aviationweather.gov API (returns elev in feet)
+  // 2. aviationweather.gov airport database, through the relay (the browser
+  //    cannot call that API directly — no CORS). Elevation arrives in feet.
   try {
-    const r = await fetch(`https://aviationweather.gov/api/data/airport?ids=${icao}&format=json`, {signal: AbortSignal.timeout(8000)});
-    if (r.ok) {
-      const d = await r.json();
-      if (Array.isArray(d) && d.length && d[0].lat != null) {
-        return {
-          lat:  parseFloat(d[0].lat),
-          lon:  parseFloat(d[0].lon),
-          name: d[0].name || icao,
-          elev: parseFloat(d[0].elev) || 0,   // ft MSL from API
-        };
-      }
+    const d = await relayGet({ airport: icao });
+    if (d && typeof d.lat === 'number' && typeof d.lon === 'number') {
+      return {
+        lat:  d.lat,
+        lon:  d.lon,
+        name: d.name || icao,
+        elev: typeof d.elev_ft === 'number' ? d.elev_ft : 0,
+      };
     }
-  } catch(e) { console.warn('Airport API fallback failed:', e.message); }
+  } catch(e) { console.warn('Airport lookup failed:', e.message); }
   return null;
 }
 
@@ -927,68 +1045,83 @@ async function fetchMETAR(icao) {
     frEl.textContent = p.fr || '—';
     frEl.style.color = {VFR:'var(--green)',MVFR:'#4090e0',IFR:'var(--amber)',LIFR:'#e04040'}[p.fr]||'var(--txt)';
   };
-  // Primary: VATSIM METAR server — returns plain text, CORS-open from file://
+  // Primary: VATSIM METAR server — plain text, readable straight from the browser.
+  // A real METAR line starts with the station code; anything else is "no data".
   try {
-    const r = await fetch(`https://metar.vatsim.net/metar.php?id=${icao}`, {signal:AbortSignal.timeout(8000)});
+    const r = await fetch(`https://metar.vatsim.net/metar.php?id=${icao}`, {signal:timeoutSignal(8000)});
     if (r.ok) {
       const txt = await r.text();
-      const line = txt.trim().split(/\r?\n/).find(l => l.startsWith(icao)) || txt.trim();
-      if (line) { updateDOM(parseMETAR(line)); return; }
+      const line = txt.trim().split(/\r?\n/).map(l => l.trim()).find(l => l.startsWith(icao + ' '));
+      if (line) { updateDOM(parseMETAR(line)); return true; }
     }
   } catch(e) { console.warn('VATSIM METAR:', e.message); }
-  // Fallback: aviationweather.gov JSON — works from http server, CORS-blocked from file://
+  // Fallback: aviationweather.gov through the relay (no CORS on their API)
   try {
-    const r = await fetch(`https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`, {signal:AbortSignal.timeout(8000)});
-    if (r.ok) {
-      const d = await r.json();
-      if (Array.isArray(d) && d.length) updateDOM(parseMETAR(d[0].rawOb || ''));
-    }
-  } catch(e) { console.warn('METAR fallback:', e.message); }
+    const d = await relayGet({ metar: icao });
+    if (d && typeof d.raw === 'string' && d.raw) { updateDOM(parseMETAR(d.raw)); return true; }
+  } catch(e) { console.warn('METAR via relay:', e.message); }
+  return false;
 }
 
-// ── AIRCRAFT FETCH (airplanes.live primary, adsb.fi fallback) ────────────
-async function fetchFlights() {
-  const lat = CFG.lat.toFixed(4), lon = CFG.lon.toFixed(4), nm = CFG.radiusNm;
-  const SOURCES = [
-    `https://api.airplanes.live/v2/point/${lat}/${lon}/${nm}`,
-    `https://api.adsb.fi/v1/point/${lat}/${lon}/${nm}`,
-  ];
-  let d = null, lastErr = null;
-  for (const url of SOURCES) {
-    try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(12000) });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      d = await r.json();
-      break;
-    } catch(e) { lastErr = e; console.warn('ADS-B source failed:', url, e.message); }
-  }
-  if (!d) throw new Error(lastErr?.message || 'All ADS-B sources failed');
-  const ac = d.ac || d.aircraft || [];
+// Weather runs on its own clock, independent of the aircraft feed: a METAR
+// changes about once an hour, so ask every 5 minutes (1 minute after a miss).
+let metarNextAt = 0;
+function refreshWeather() {
+  const now = Date.now();
+  if (now < metarNextAt) return;
+  metarNextAt = now + 60000;
+  fetchMETAR(CFG.icao).then(ok => { if (ok) metarNextAt = Date.now() + 300000; });
+}
 
-  return ac
-    .filter(a => a.lat != null && a.lon != null)
-    .map(a => {
-      // alt_baro can be a number (feet) or the string "ground"
-      const onGround = a.on_ground === true || a.on_ground === 1 || a.alt_baro === 'ground';
-      const altFt    = (typeof a.alt_baro === 'number') ? Math.round(a.alt_baro) : null;
-      return {
-        hex:       a.hex || a.icao24 || '?',
-        callsign:  (a.flight || a.callsign || '').trim() || null,
-        reg:       a.r || a.registration || null,
-        typeCode:  a.t || a.type_code || null,
-        desc:      a.desc || a.description || null,
-        orig:      null,   // filled asynchronously by enrichRoute()
-        dest:      null,
-        lat:       a.lat,
-        lon:       a.lon,
-        alt_ft:    altFt,
-        gs:        a.gs != null ? Math.round(a.gs) : null,
-        track:     a.track != null ? a.track : null,
-        baro_rate: a.baro_rate != null ? a.baro_rate : null,
-        on_ground: onGround,
-        dist:      distNm(CFG.lat, CFG.lon, a.lat, a.lon),
-      };
-    })
+// ── AIRCRAFT FETCH (adsb.lol + adsb.fi, merged by the relay) ─────────────
+let feedSources = [];   // per-feed report from the last good answer — drives the footer credit
+
+// One raw feed record → the shape the rest of the page uses. Null = unusable.
+function toFlight(a, seen) {
+  if (!a || typeof a !== 'object') return null;
+  const num = v => (typeof v === 'number' && Number.isFinite(v)) ? v : null;
+  const str = v => (typeof v === 'string' && v.trim()) ? v.trim() : null;
+  const pick = (...vals) => { for (const v of vals) { const n = num(v); if (n != null) return n; } return null; };
+
+  const lat = num(a.lat), lon = num(a.lon);
+  if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  const hex = String(a.hex || a.icao24 || '').toLowerCase().replace(/[^0-9a-f~]/g, '');
+  if (!hex || seen.has(hex)) return null;
+  seen.add(hex);
+
+  // alt_baro is a number (feet) or the string "ground"
+  const onGround = a.alt_baro === 'ground' || a.on_ground === true || a.on_ground === 1;
+  const alt = onGround ? null : pick(a.alt_baro, a.alt_geom);
+  const gs  = num(a.gs);
+  return {
+    hex,
+    callsign:  str(a.flight) || str(a.callsign),
+    reg:       str(a.r) || str(a.registration),
+    typeCode:  str(a.t) || str(a.type_code),
+    desc:      str(a.desc) || str(a.description),
+    orig:      null,   // filled asynchronously by enrichRoute()
+    dest:      null,
+    lat, lon,
+    alt_ft:    alt != null ? Math.round(alt) : null,
+    gs:        gs != null ? Math.round(gs) : null,
+    // Aircraft on the ground often report a heading but no track
+    track:     pick(a.track, a.true_heading, a.mag_heading),
+    baro_rate: pick(a.baro_rate, a.geom_rate),
+    on_ground: onGround,
+    dist:      distNm(CFG.lat, CFG.lon, lat, lon),
+  };
+}
+
+async function fetchFlights() {
+  const d = await relayGet({ lat: CFG.lat.toFixed(3), lon: CFG.lon.toFixed(3), r: CFG.radiusNm });
+  const list = Array.isArray(d.ac) ? d.ac : Array.isArray(d.aircraft) ? d.aircraft : null;
+  if (!list) throw feedError('relay', 'relay answer had no aircraft list');
+  feedSources = Array.isArray(d.sources) ? d.sources : [];
+
+  const seen = new Set();
+  return list
+    .map(a => toFlight(a, seen))
+    .filter(Boolean)
     .map(f => { f.status = getStatus(f); return f; })
     .sort((a,b) => {
       const os = (STATUS_ORD[a.status]??5) - (STATUS_ORD[b.status]??5);
@@ -1011,12 +1144,12 @@ function renderRouteCell(route, currentIcao, currentIata) {
   const isDestHere = route.dest && (route.dest === currentIcao || route.dest === currentIata);
   const origCls = isOrigHere ? 'td-route-orig td-route-here' : 'td-route-orig';
   const destCls = isDestHere ? 'td-route-dest td-route-here' : 'td-route-dest';
-  const orig = route.orig || '?';
-  const dest = route.dest || '?';
-  const origCity = route.origCity || '';
-  const destCity = route.destCity || '';
+  const orig = esc(route.orig || '?');
+  const dest = esc(route.dest || '?');
+  const origCity = String(route.origCity || '');
+  const destCity = String(route.destCity || '');
   // Truncate cities so they fit
-  const trunc = (s, n) => s.length > n ? s.slice(0, n) + '…' : s;
+  const trunc = (s, n) => esc(s.length > n ? s.slice(0, n) + '…' : s);
   return `<div class="td-route-row">
     <span class="${origCls}">${orig}</span>
     <span class="td-route-arr-inline">→</span>
@@ -1138,7 +1271,7 @@ async function fetchRoute(callsign) {
   if (routeCache.has(callsign)) return routeCache.get(callsign);
   try {
     const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`,
-      { signal: AbortSignal.timeout(8000) });
+      { signal: timeoutSignal(8000) });
     if (!r.ok) { routeCache.set(callsign, null); return null; }
     const d = await r.json();
     const fr = d?.response?.flightroute;
@@ -1199,12 +1332,13 @@ function renderTable(flights) {
   tblWrap.style.display = '';
 
   tbody.innerHTML = flights.map(f => {
-    const cs      = f.callsign || f.reg || f.hex.toUpperCase();
-    const reg     = f.reg || f.hex.toUpperCase();
-    const showReg = (reg !== cs) ? reg : '';
-    const typeTxt = f.typeCode || '—';
-    const descTxt = f.desc ? (f.desc.length > 26 ? f.desc.slice(0,26)+'…' : f.desc) : '';
-    const altPct  = f.alt_ft ? Math.min(100, (f.alt_ft/45000)*100) : 0;
+    const csRaw   = f.callsign || f.reg || f.hex.toUpperCase();
+    const regRaw  = f.reg || f.hex.toUpperCase();
+    const cs      = esc(csRaw);
+    const showReg = (regRaw !== csRaw) ? esc(regRaw) : '';
+    const typeTxt = esc(f.typeCode || '—');
+    const descTxt = f.desc ? esc(f.desc.length > 26 ? f.desc.slice(0,26)+'…' : f.desc) : '';
+    const altPct  = f.alt_ft > 0 ? Math.min(100, (f.alt_ft/45000)*100) : 0;
     const cls     = STATUS_CLS[f.status] || 'OVR';
     const hdg     = f.track || 0;
 
@@ -1319,7 +1453,7 @@ function initMap() {
     className:'', iconSize:[22,22], iconAnchor:[11,11],
   });
   L.marker([CFG.lat, CFG.lon], {icon:airIco}).addTo(map)
-    .bindPopup(`<b style="color:#00c8f0">${CFG.icao}</b><br>${CFG.name}`);
+    .bindPopup(`<b style="color:#00c8f0">${esc(CFG.icao)}</b><br>${esc(CFG.name)}`);
 }
 
 function planeIcon(hdg, status) {
@@ -1373,10 +1507,10 @@ function updateMarkers(flights) {
     // ── Marker (existing logic) ─────────────────────────────────────────
     const cs  = f.callsign || f.reg || f.hex.toUpperCase();
     const ico = planeIcon(f.track, f.status);
-    const pop = `<b style="color:#00c8f0">${cs}</b>${f.reg&&f.reg!==cs?'<br>'+f.reg:''}<br>`
+    const pop = `<b style="color:#00c8f0">${esc(cs)}</b>${f.reg&&f.reg!==cs?'<br>'+esc(f.reg):''}<br>`
       + `${f.alt_ft!=null ? f.alt_ft.toLocaleString()+' ft' : f.on_ground ? 'On Ground' : '—'}`
       + ` · ${f.gs!=null ? f.gs+' kt' : '—'}<br>${f.status} · ${f.dist.toFixed(1)} nm`
-      + (f.typeCode ? `<br><span style="color:#506878">${f.typeCode}${f.desc?' · '+f.desc:''}</span>` : '');
+      + (f.typeCode ? `<br><span style="color:#506878">${esc(f.typeCode)}${f.desc?' · '+esc(f.desc):''}</span>` : '');
     if (markers.has(f.hex)) {
       const m = markers.get(f.hex);
       m.setLatLng([f.lat,f.lon]); m.setIcon(ico); m.getPopup()?.setContent(pop);
@@ -1387,16 +1521,77 @@ function updateMarkers(flights) {
 }
 
 // ── MAIN LOOP ─────────────────────────────────────────────────────────────
+// Turn a feed failure into words a person can act on from the couch.
+function describeFeedProblem(e) {
+  const retry = 'Retrying every 30 seconds.';
+  const list = Array.isArray(e.sources)
+    ? e.sources.map(s => `${s.name} ${s.status}`).join(' · ')
+    : '';
+  switch (e.kind) {
+    case 'norelay':
+      return { title: 'Live feed not connected',
+               short: 'no relay',
+               text:  'This page gets its aircraft through a small relay (api/feed), and none answered.\n'
+                    + 'Open the page from the relay\'s own address, or add ?relay=https://your-relay to the URL. See the README.' };
+    case 'origin':
+      return { title: 'Relay refused this page',
+               short: 'relay refused this page',
+               text:  `Add ${location.host || 'this page\'s host'} to ALLOWED_HOSTS in api/feed.js, then redeploy the relay.` };
+    case 'feeds':
+      return { title: 'Aircraft feeds not answering',
+               short: list || 'feeds not answering',
+               text:  (list ? list + '\n' : '') + 'The relay is working; the feeds are refusing or not answering it. ' + retry };
+    case 'network':
+      return { title: 'Relay unreachable',
+               short: e.message,
+               text:  `Could not reach ${e.host || 'the relay'}. Check the internet connection. ${retry}` };
+    default:
+      return { title: 'Live feed error', short: e.message || 'feed error', text: `${e.message || 'Unknown error'}\n${retry}` };
+  }
+}
+
+// The big panel under the table header: normal "scanning" look, or a readable error.
+function showFeedState(problem) {
+  const empty = document.getElementById('empty');
+  empty.classList.toggle('err', !!problem);
+  document.getElementById('e-lbl').textContent = problem ? problem.title : 'Scanning Airspace';
+  document.getElementById('e-sub').textContent = problem ? problem.text  : 'No aircraft detected within range';
+  if (problem) {
+    document.getElementById('badge').textContent   = 'NO DATA';
+    document.getElementById('f-count').textContent = '—';
+  }
+}
+
+// Footer credit: both feeds require attribution, and it doubles as a health readout.
+function renderSources() {
+  if (!feedSources.length) return;
+  document.getElementById('f-src').innerHTML = feedSources.map(s => {
+    const label = esc(s.name || '?') + (s.ok ? '' : ' ' + esc(s.status));
+    const link  = /^https:\/\//.test(s.home || '')
+      ? `<a href="${esc(s.home)}" target="_blank" rel="noopener">${label}</a>` : label;
+    return s.ok ? link : `<span class="src-off">${link}</span>`;
+  }).join(' + ');
+}
+
+let refreshing = false;
+let lastGoodAt = 0;                 // when the feed last answered
+const STALE_AFTER_MS = 120000;      // after this long without data, stop showing old aircraft
+
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
   const dot = document.getElementById('dot');
   dot.style.background = 'var(--amber)'; dot.style.boxShadow = 'var(--amber-glo)';
+  refreshWeather();   // independent of the aircraft feed
   try {
     const flights = await fetchFlights();
-    fetchMETAR(CFG.icao); // fire and forget
+    lastGoodAt = Date.now();
+    showFeedState(null);
     renderTable(flights);
     enrichRoutes(flights);
     checkStatusTransitions(flights); // audio alerts on status change
     updateMarkers(flights);
+    renderSources();
     const n = new Date();
     const z = s => String(s).padStart(2,'0');
     document.getElementById('f-upd').textContent = `${z(n.getUTCHours())}:${z(n.getUTCMinutes())}Z`;
@@ -1404,8 +1599,19 @@ async function refresh() {
     dot.style.background = 'var(--green)'; dot.style.boxShadow = 'var(--green-glo)';
   } catch(e) {
     console.error(e);
-    document.getElementById('f-err').textContent = `⚠ ${e.message}`;
+    const problem = describeFeedProblem(e);
+    document.getElementById('f-err').textContent = `⚠ ${problem.short}`;
     dot.style.background = 'rgba(240,80,80,.75)'; dot.style.boxShadow = '';
+    // A short hiccup keeps the last picture on screen. After two minutes an
+    // old picture is misleading, so clear it and say plainly what is wrong.
+    if (Date.now() - lastGoodAt > STALE_AFTER_MS) {
+      renderTable([]);
+      checkStatusTransitions([]);
+      updateMarkers([]);
+      showFeedState(problem);
+    }
+  } finally {
+    refreshing = false;
   }
 }
 
@@ -1421,7 +1627,7 @@ async function init() {
     setLoadingMsg('Looking up airport…');
     const ap = await lookupAirport(CFG.icao);
     if (!ap) {
-      showLoadingError(`Airport "${CFG.icao}" not found. Try adding ?lat=XX.XXX&lon=-XXX.XXX&name=My+Airport to the URL.`);
+      showLoadingError(`Airport "${CFG.icao}" is not in the built-in list and the online lookup found nothing. Try adding ?lat=XX.XXX&lon=-XXX.XXX&name=My+Airport to the URL.`);
       return;
     }
     CFG.lat  = ap.lat;
