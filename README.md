@@ -134,6 +134,7 @@ These feeds are run by volunteers and funded by donations. The relay is built to
 - a feed that answers "slow down" (429) or "no" (403) is left alone for a while instead of being retried
 - every request identifies itself with a `User-Agent` naming this project — **if you fork it, change `USER_AGENT` in `api/feed.js` to your own repo or e-mail**
 - both feeds are credited, with links, in the page footer (their terms require it: adsb.lol data is ODbL; adsb.fi is for personal, non-commercial use)
+- route lookups are made only for real flight numbers; a callsign that is just a tail number (`N770CC`) has no scheduled route, and the database's stale guesses for those were wrong
 
 One screen running around the clock makes roughly 90,000 relay requests a month — well inside Vercel's free Hobby allowance.
 
@@ -155,6 +156,23 @@ The screen tells you which piece is failing:
 | **Relay unreachable**              | No network path to the relay                                                  | Check the internet connection on the TV                           |
 | **Live feed error** … `HTTP 401`   | You opened a protected per-deployment address                                 | Use the short production address under **Domains**                |
 | Footer shows e.g. `adsb.lol 429`   | One feed is rate-limiting the relay; the other is still supplying aircraft    | Nothing                                                           |
+| Map stamped **API KEY REQUIRED**   | `CARTO_KEY` is set but CARTO rejects it (mistyped, deleted, wrong site)       | Fix or remove `CARTO_KEY`, then redeploy — see Map Background     |
+
+---
+
+## 🌍 Map Background
+
+The map needs no setup. Out of the box the page loads OpenStreetMap's standard tiles and turns them into a dark monochrome map in the browser.
+
+For the purpose-built dark map this page was designed around — CARTO "Dark Matter" — add a free CARTO key. (CARTO's tiles needed no key until late August 2026; without one they now come back stamped **API KEY REQUIRED**.)
+
+1. Request a key at [carto.com/basemaps/apikey](https://carto.com/basemaps/apikey). No account; it arrives by e-mail in about a minute. Free for non-commercial use up to 5 million tile requests a month.
+2. In Vercel open your project → **Settings → Environment Variables**, add `CARTO_KEY` with the key as its value, save, and **redeploy** when prompted (a new variable only reaches new deployments).
+3. Reload the page. The map credit in the corner now reads "© OpenStreetMap contributors, © CARTO".
+
+Running locally instead: `CARTO_KEY=your-key node local-server.js` (PowerShell: `$env:CARTO_KEY="your-key"; node local-server.js`).
+
+**Why the key is not in `index.html`:** the relay hands it to the page, so it never sits in the public repo — forks don't borrow your key, and updating the page never erases it. It is not a secret (any browser showing the map can see it in the tile requests), so restrict it to your site's host in CARTO's key dashboard.
 
 ---
 
@@ -213,6 +231,8 @@ Two files do the work, and neither needs a build step or a dependency:
 | `local-server.js` | on your machine | Optional: serves both from one computer                             |
 | `package.json`    | —               | Only tells Node the relay is an ES module                           |
 
+Nothing has to be configured. One setting is optional: the `CARTO_KEY` environment variable described under [Map Background](#-map-background).
+
 ### Data sources
 
 | Source                                                  | What it provides                            | Reached                |
@@ -222,7 +242,8 @@ Two files do the work, and neither needs a build step or a dependency:
 | 🌦️ [VATSIM METAR](https://metar.vatsim.net)             | Airport weather                             | directly               |
 | 🌦️ [aviationweather.gov](https://aviationweather.gov)   | Weather fallback + airport lookup           | via the relay          |
 | 🛬 [adsbdb.com](https://adsbdb.com)                     | Filed flight plan routes (commercial)       | directly               |
-| 🗺️ [CARTO Dark](https://carto.com)                      | Map tiles (via Leaflet)                     | directly               |
+| 🗺️ [OpenStreetMap](https://www.openstreetmap.org)       | Map tiles, darkened in the browser (no key) | directly               |
+| 🗺️ [CARTO Dark](https://carto.com/basemaps)             | Map tiles, if you add a free key (optional) | directly               |
 
 ---
 

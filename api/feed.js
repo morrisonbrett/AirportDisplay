@@ -18,8 +18,10 @@
 //   /api/feed?lat=34.849&lon=-111.790&r=30   aircraft within r nautical miles
 //   /api/feed?metar=KSEZ                      latest raw METAR (aviationweather.gov)
 //   /api/feed?airport=KXYZ                    position / name / elevation of an airport
+//   /api/feed?config=1                        optional page settings (the CARTO map key)
 //
-// No dependencies, no API keys, nothing to configure for the default setup.
+// No dependencies, and nothing to configure for the default setup. One optional
+// environment variable: CARTO_KEY, a free key that restores CARTO's dark map tiles.
 
 // The feeds ask every client to identify itself. adsb.lol answers 403 to generic
 // User-Agents. If you fork this project, point this at YOUR repo or e-mail.
@@ -272,6 +274,14 @@ export default async function handler(req, res) {
     const q = new URL(req.url || '/', 'http://relay.local').searchParams;
     const code = v => { const s = String(v || '').trim().toUpperCase(); return /^[A-Z0-9]{3,4}$/.test(s) ? s : null; };
 
+    if (q.has('config')) {
+      // Settings the page needs but that should not live in the public repo.
+      // CARTO_KEY: the free key for CARTO's dark map tiles (https://carto.com/basemaps/apikey).
+      // It ends up in tile URLs in the browser anyway, so it is not a secret — keeping it in
+      // the environment just means forks and file updates never carry or erase your key.
+      const key = String(process.env.CARTO_KEY || '').trim();
+      return reply(res, 200, { cartoKey: /^[\w.\-]{8,200}$/.test(key) ? key : null });   // asked once per page load; not cached
+    }
     if (q.has('metar')) {
       const icao = code(q.get('metar'));
       return icao ? await handleMetar(res, icao) : reply(res, 400, { error: 'metar must be a 3–4 character station code' });

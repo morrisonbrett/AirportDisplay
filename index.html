@@ -197,8 +197,12 @@
 
     .map-lbl { position:absolute; bottom:10px; left:10px; z-index:500; pointer-events:none; font-family:var(--f-ui); font-size:clamp(8px,.7vw,12px); font-weight:700; letter-spacing:.2em; text-transform:uppercase; color:rgba(180,220,240,.4); }
 
-    .leaflet-control-attribution { background:rgba(4,6,14,.85)!important; color:rgba(80,104,120,.55)!important; font-size:7px!important; }
-    .leaflet-control-attribution a { color:rgba(80,104,120,.55)!important; }
+    .leaflet-container { background:#030508!important; }   /* dark behind tiles while they load */
+    /* Map credit: both tile providers require it to be readable, so it is small but legible */
+    .leaflet-control-attribution { background:rgba(4,6,14,.85)!important; color:rgba(150,175,195,.8)!important; font-size:clamp(8px,.58vw,12px)!important; }
+    .leaflet-control-attribution a { color:rgba(150,175,195,.8)!important; }
+    /* No CARTO key: OpenStreetMap's standard (light) tiles, turned into a dark monochrome map in the browser */
+    #map.osm-dark .leaflet-tile-pane { filter:grayscale(1) invert(1) brightness(.6) contrast(1.15); }
     .leaflet-control-zoom a { background:var(--bg2)!important; border-color:var(--bd2)!important; color:var(--txt2)!important; }
     .leaflet-control-zoom a:hover { background:var(--bg3)!important; color:var(--cyan)!important; }
     .leaflet-popup-content-wrapper { background:var(--bg2)!important; border:1px solid var(--bd2)!important; border-radius:4px!important; box-shadow:0 6px 24px rgba(0,0,0,.9)!important; color:var(--txt)!important; font-family:var(--f-data)!important; font-size:11px!important; }
@@ -454,7 +458,7 @@ function timeoutSignal(ms) {
 
 // GET one JSON answer from the relay. Tries each known address; throws a
 // feedError describing the most useful failure when none works.
-async function relayGet(params) {
+async function relayGet(params, timeoutMs) {
   const now = Date.now();
   let order = RELAYS.filter(u => !(relaySkipUntil.get(u) > now));
   if (relayGood && order.includes(relayGood)) order = [relayGood, ...order.filter(u => u !== relayGood)];
@@ -470,7 +474,7 @@ async function relayGet(params) {
     const host = new URL(base).host;
     let r;
     try {
-      r = await fetch(`${base}?${new URLSearchParams(params)}`, { signal: timeoutSignal(10000) });
+      r = await fetch(`${base}?${new URLSearchParams(params)}`, { signal: timeoutSignal(timeoutMs || 10000) });
     } catch (e) {
       console.warn('Relay unreachable:', base, e.message);
       note(feedError('network', `could not reach ${host}`, { host }));
@@ -1010,7 +1014,7 @@ function parseMETAR(raw) {
   if (!raw) return {};
   let wind='—', vis='—', sky='—', temp='—', altim='—', fr='VFR';
   const wm = raw.match(/(\d{3}|VRB)(\d{2,3})(G\d+)?KT/);
-  if (wm) wind = `${wm[1]}° ${parseInt(wm[2])}${wm[3]||''}kt`;
+  if (wm) wind = `${wm[1] === 'VRB' ? 'VRB' : wm[1] + '°'} ${parseInt(wm[2])}${wm[3]||''}kt`;   // variable wind has no direction, so no degree sign
   const vm = raw.match(/(\d+(?:\s+\d+\/\d+)?|\d+\/\d+)SM/);
   if (vm) vis = vm[0];
   for (const t of ['OVC','BKN','SCT','FEW','SKC','CLR','CAVOK']) {
@@ -1299,11 +1303,25 @@ async function fetchRoute(callsign) {
 // public APIs (OpenSky, hexdb.io) don't support CORS from arbitrary origins.
 // For unfiled VFR aircraft, we fall back to the inferred-from-status logic
 // in the row renderer (KSEZ → ?, ? → KSEZ based on observed behavior).
+// A callsign that is only the aircraft's own registration (N770CC) is not a
+// flight number. The route database holds at best a stale guess for it — a
+// jet parked at Sedona came back as "Ithaca → Fort Lauderdale" — and a wrong
+// destination would also stop the status logic from calling a real arrival.
+// So only genuine flight numbers (UAL1219, EJA512…) are looked up.
+function isFlightNumber(f) {
+  const norm = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const cs = norm(f.callsign);
+  if (!cs) return false;
+  if (f.reg && cs === norm(f.reg)) return false;
+  if (/^N[1-9][0-9]{0,4}[A-Z]{0,2}$/.test(cs)) return false;   // US tail number, registration not in the feed
+  return true;
+}
+
 function enrichRoutes(flights) {
   const iataUs = CFG.icao.length === 4 ? CFG.icao.slice(1) : CFG.icao;
 
   flights.forEach(async f => {
-    if (!f.callsign) return;
+    if (!isFlightNumber(f)) return;
     const route = await fetchRoute(f.callsign);
     if (!route) return;
     const row = document.querySelector(`tr[data-hex="${f.hex}"]`);
@@ -1439,11 +1457,34 @@ const STATUS_TRAIL_COLOR = {
   GROUND:    '#6090b0',
 };
 
-function initMap() {
+// ── MAP BACKGROUND ───────────────────────────────────────────────────────
+// CARTO's dark basemap — the look this page was designed around — has needed
+// a free API key since September 2026 (keyless tiles come back stamped
+// "API KEY REQUIRED"). The key is deliberately NOT kept in this file: set it
+// once as the CARTO_KEY environment variable where the relay runs, and the
+// relay hands it to the page. Get one at https://carto.com/basemaps/apikey
+// Without a key the page uses OpenStreetMap's own tiles, darkened in the
+// browser: no key, no sign-up.
+async function fetchMapKey() {
+  try {
+    const cfg = await relayGet({ config: 1 }, 4000);
+    const key = cfg && cfg.cartoKey;
+    return (typeof key === 'string' && /^[\w.\-]{8,200}$/.test(key)) ? key : null;
+  } catch (e) { return null; }
+}
+
+function initMap(cartoKey) {
   map = L.map('map', { center:[CFG.lat, CFG.lon], zoom:11, attributionControl:true });
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution:'&copy; OpenStreetMap &copy; CARTO', subdomains:'abcd', maxZoom:19,
-  }).addTo(map);
+  const osmCredit = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
+  if (cartoKey) {
+    L.tileLayer(`https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(cartoKey)}`, {
+      attribution: `${osmCredit}, &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>`,
+      subdomains:'abcd', maxZoom:19,
+    }).addTo(map);
+  } else {
+    document.getElementById('map').classList.add('osm-dark');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: osmCredit, maxZoom:19 }).addTo(map);
+  }
   // Rings
   const rs = { color:'#00c8f0', weight:.6, opacity:.15, fill:false, dashArray:'4 10' };
   [5,10,20].forEach(nm => L.circle([CFG.lat, CFG.lon], {...rs, radius:nm*1852}).addTo(map));
@@ -1670,7 +1711,7 @@ async function init() {
   });
 
   setLoadingMsg('Initializing map…');
-  initMap();
+  initMap(await fetchMapKey());
 
   setLoadingMsg('Fetching aircraft…');
   await refresh();
